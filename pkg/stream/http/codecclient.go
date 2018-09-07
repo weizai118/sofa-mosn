@@ -14,17 +14,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package http
 
 import (
 	"container/list"
 	"context"
+	"crypto/tls"
 	"sync"
-
-	"github.com/valyala/fasthttp"
-	str "github.com/alipay/sofamosn/pkg/stream"
-	"github.com/alipay/sofamosn/pkg/types"
 	"sync/atomic"
+
+	str "github.com/alipay/sofa-mosn/pkg/stream"
+	"github.com/alipay/sofa-mosn/pkg/types"
+	"github.com/valyala/fasthttp"
 )
 
 // connection management is done by fasthttp
@@ -51,11 +53,20 @@ type codecClient struct {
 	RemoteCloseFlag           bool
 }
 
-func NewHttp1CodecClient(context context.Context, host types.HostInfo) str.CodecClient {
+func NewHTTP1CodecClient(context context.Context, host types.HostInfo) str.CodecClient {
+	var isTLS bool
+	var tlsConfig *tls.Config
+	tlsMng := host.ClusterInfo().TLSMng()
+	if tlsMng != nil && tlsMng.Enabled() {
+		isTLS = true
+		tlsConfig = tlsMng.Config()
+	}
 	codecClient := &codecClient{
 		client: &fasthttp.HostClient{
 			Addr:          host.AddressString(),
 			DialDualStack: true,
+			IsTLS:         isTLS,
+			TLSConfig:     tlsConfig,
 		},
 		context:        context,
 		Host:           host,
@@ -68,7 +79,7 @@ func NewHttp1CodecClient(context context.Context, host types.HostInfo) str.Codec
 	return codecClient
 }
 
-func (c *codecClient) Id() uint64 {
+func (c *codecClient) ID() uint64 {
 	return 0
 }
 
@@ -99,9 +110,9 @@ func (c *codecClient) RemoteClose() bool {
 	return c.RemoteCloseFlag
 }
 
-func (c *codecClient) NewStream(streamId string, respDecoder types.StreamReceiver) types.StreamSender {
+func (c *codecClient) NewStream(context context.Context, streamID string, respDecoder types.StreamReceiver) types.StreamSender {
 	ar := newActiveRequest(c, respDecoder)
-	ar.requestEncoder = c.Codec.NewStream(streamId, ar)
+	ar.requestEncoder = c.Codec.NewStream(context, streamID, ar)
 	ar.requestEncoder.GetStream().AddEventListener(ar)
 
 	c.AcrMux.Lock()
@@ -132,15 +143,22 @@ func (c *codecClient) OnEvent(event types.ConnectionEvent) {
 
 	if event.IsClose() {
 		var arNext *list.Element
+
+		c.AcrMux.RLock()
+		acReqs := make([]*activeRequest, 0, c.ActiveRequests.Len())
 		for ar := c.ActiveRequests.Front(); ar != nil; ar = arNext {
-			reason := types.StreamConnectionFailed
 			arNext = ar.Next()
-			
+			acReqs = append(acReqs, ar.Value.(*activeRequest))
+		}
+		c.AcrMux.RUnlock()
+
+		for _, ac := range acReqs {
+			reason := types.StreamConnectionFailed
+
 			if c.ConnectedFlag {
 				reason = types.StreamConnectionTermination
 			}
-
-			ar.Value.(*activeRequest).requestEncoder.GetStream().ResetStream(reason)
+			ac.requestEncoder.GetStream().ResetStream(reason)
 		}
 	}
 }
@@ -193,7 +211,7 @@ type activeRequest struct {
 	responseDecoder types.StreamReceiver
 	requestEncoder  types.StreamSender
 	element         *list.Element
-	deleted          uint32
+	deleted         uint32
 }
 
 func newActiveRequest(codecClient *codecClient, streamDecoder types.StreamReceiver) *activeRequest {
@@ -207,37 +225,37 @@ func (r *activeRequest) OnResetStream(reason types.StreamResetReason) {
 	r.codecClient.onReset(r, reason)
 }
 
-func (r *activeRequest) OnReceiveHeaders(headers map[string]string, endStream bool) {
+func (r *activeRequest) OnReceiveHeaders(context context.Context, headers map[string]string, endStream bool) {
 	if endStream {
 		r.onPreDecodeComplete()
 	}
 
-	r.responseDecoder.OnReceiveHeaders(headers, endStream)
+	r.responseDecoder.OnReceiveHeaders(context, headers, endStream)
 
 	if endStream {
 		r.onDecodeComplete()
 	}
 }
 
-func (r *activeRequest) OnReceiveData(data types.IoBuffer, endStream bool) {
+func (r *activeRequest) OnReceiveData(context context.Context, data types.IoBuffer, endStream bool) {
 	if endStream {
 		r.onPreDecodeComplete()
 	}
 
-	r.responseDecoder.OnReceiveData(data, endStream)
+	r.responseDecoder.OnReceiveData(context, data, endStream)
 
 	if endStream {
 		r.onDecodeComplete()
 	}
 }
 
-func (r *activeRequest) OnReceiveTrailers(trailers map[string]string) {
+func (r *activeRequest) OnReceiveTrailers(context context.Context, trailers map[string]string) {
 	r.onPreDecodeComplete()
-	r.responseDecoder.OnReceiveTrailers(trailers)
+	r.responseDecoder.OnReceiveTrailers(context, trailers)
 	r.onDecodeComplete()
 }
 
-func (r *activeRequest) OnDecodeError(err error, headers map[string]string) {
+func (r *activeRequest) OnDecodeError(context context.Context, err error, headers map[string]string) {
 }
 
 func (r *activeRequest) onPreDecodeComplete() {

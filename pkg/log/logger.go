@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package log
 
 import (
@@ -26,13 +27,14 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/alipay/sofa-mosn/pkg/types"
 	"github.com/hashicorp/go-syslog"
-	"github.com/alipay/sofamosn/pkg/types"
 )
 
+// Log Instance
 var (
-	DefaultLogger, StartLogger *logger
-
+	DefaultLogger        *logger
+	StartLogger          *logger
 	remoteSyslogPrefixes = map[string]string{
 		"syslog+tcp://": "tcp",
 		"syslog+udp://": "udp",
@@ -51,12 +53,14 @@ func init() {
 	//use console  as start logger
 	StartLogger = &logger{
 		Output:  "",
-		Level:   DEBUG,
-		Roller:  DefaultLogRoller(),
+		Level:   INFO,
+		Roller:  DefaultRoller(),
 		fileMux: new(sync.RWMutex),
 	}
 
 	StartLogger.Start()
+	// default as start before Init
+	DefaultLogger = StartLogger
 }
 
 // Logger
@@ -64,17 +68,19 @@ type logger struct {
 	*log.Logger
 
 	Output  string
-	Level   LogLevel
-	Roller  *LogRoller
+	Level   Level
+	Roller  *Roller
 	writer  io.Writer
 	fileMux *sync.RWMutex
 }
 
-func InitDefaultLogger(output string, level LogLevel) error {
+// InitDefaultLogger
+// start default logger
+func InitDefaultLogger(output string, level Level) error {
 	DefaultLogger = &logger{
 		Output:  output,
 		Level:   level,
-		Roller:  DefaultLogRoller(),
+		Roller:  DefaultRoller(),
 		fileMux: new(sync.RWMutex),
 	}
 
@@ -83,6 +89,8 @@ func InitDefaultLogger(output string, level LogLevel) error {
 	return DefaultLogger.Start()
 }
 
+// ByContext
+// Get default logger by context
 func ByContext(ctx context.Context) Logger {
 	if ctx != nil {
 		if logger := ctx.Value(types.ContextKeyLogger); logger != nil {
@@ -97,7 +105,9 @@ func ByContext(ctx context.Context) Logger {
 	return DefaultLogger
 }
 
-func GetLoggerInstance(output string, level LogLevel) (Logger, error) {
+// GetLoggerInstance
+// get logger instance which has the same 'output' and 'level'
+func GetLoggerInstance(output string, level Level) (Logger, error) {
 	for _, logger := range loggers {
 		if logger.Output == output && logger.Level == level {
 			return logger, nil
@@ -107,11 +117,12 @@ func GetLoggerInstance(output string, level LogLevel) (Logger, error) {
 	return NewLogger(output, level)
 }
 
-func NewLogger(output string, level LogLevel) (Logger, error) {
+// NewLogger
+func NewLogger(output string, level Level) (Logger, error) {
 	logger := &logger{
 		Output:  output,
 		Level:   level,
-		Roller:  DefaultLogRoller(),
+		Roller:  DefaultRoller(),
 		fileMux: new(sync.RWMutex),
 	}
 
@@ -272,6 +283,7 @@ func parseSyslogAddress(location string) *syslogAddress {
 	return nil
 }
 
+// Reopen all logger
 func Reopen() error {
 	for _, logger := range loggers {
 		if err := logger.Reopen(); err != nil {
@@ -282,6 +294,7 @@ func Reopen() error {
 	return nil
 }
 
+// CloseAll logger
 func CloseAll() error {
 	for _, logger := range loggers {
 		if err := logger.Close(); err != nil {

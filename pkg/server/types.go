@@ -14,15 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package server
 
 import (
 	"os"
 	"time"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 const (
@@ -37,20 +38,23 @@ const (
 )
 
 type Config struct {
+	ServerName      string
 	LogPath         string
-	LogLevel        log.LogLevel
+	LogLevel        log.Level
 	GracefulTimeout time.Duration
 	Processor       int
+	UseNetpollMode  bool
 }
 
 type Server interface {
-	AddListener(lc *v2.ListenerConfig, networkFiltersFactory types.NetworkFilterChainFactory, streamFiltersFactories []types.StreamFilterChainFactory)
-
-	AddListenerAndStart(lc *v2.ListenerConfig, networkFiltersFactory types.NetworkFilterChainFactory, streamFiltersFactories []types.StreamFilterChainFactory) error
+	AddListener(lc *v2.ListenerConfig, networkFiltersFactories []types.NetworkFilterChainFactory,
+		streamFiltersFactories []types.StreamFilterChainFactory) (types.ListenerEventListener, error)
 
 	Start()
 
 	Restart()
 
 	Close()
+
+	Handler() types.ConnectionHandler
 }

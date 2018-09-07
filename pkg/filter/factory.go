@@ -14,40 +14,53 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package filter
 
 import (
-	"github.com/alipay/sofamosn/pkg/filter/stream/faultinject"
-	"github.com/alipay/sofamosn/pkg/filter/stream/healthcheck/sofarpc"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/types"
+	"fmt"
+
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
-var creatorFactory map[string]StreamFilterFactoryCreator
+var creatorStreamFactory map[string]StreamFilterFactoryCreator
+var creatorNetworkFactory map[string]NetworkFilterFactoryCreator
 
 func init() {
-	creatorFactory = make(map[string]StreamFilterFactoryCreator)
-	//reg
-	Register("fault_inject", faultinject.CreateFaultInjectFilterFactory)
-	Register("healthcheck", sofarpc.CreateHealthCheckFilterFactory)
+	creatorStreamFactory = make(map[string]StreamFilterFactoryCreator)
+	creatorNetworkFactory = make(map[string]NetworkFilterFactoryCreator)
 }
 
-func Register(filterType string, creator StreamFilterFactoryCreator) {
-	creatorFactory[filterType] = creator
+// RegisterStream registers the filterType as StreamFilterFactoryCreator
+func RegisterStream(filterType string, creator StreamFilterFactoryCreator) {
+	creatorStreamFactory[filterType] = creator
 }
 
-func CreateStreamFilterChainFactory(filterType string, config map[string]interface{}) types.StreamFilterChainFactory {
+// RegisterNetwork registers the filterType as  NetworkFilterFactoryCreator
+func RegisterNetwork(filterType string, creator NetworkFilterFactoryCreator) {
+	creatorNetworkFactory[filterType] = creator
+}
 
-	if cf, ok := creatorFactory[filterType]; ok {
+// CreateStreamFilterChainFactory creates a StreamFilterChainFactory according to filterType
+func CreateStreamFilterChainFactory(filterType string, config map[string]interface{}) (types.StreamFilterChainFactory, error) {
+	if cf, ok := creatorStreamFactory[filterType]; ok {
 		sfcf, err := cf(config)
-
 		if err != nil {
-			log.StartLogger.Fatalln("create stream filter chain factory failed: ", err)
+			return nil, fmt.Errorf("create stream filter chain factory failed: %v", err)
 		}
-
-		return sfcf
-	} else {
-		log.StartLogger.Fatalln("unsupport stream filter type: ", filterType)
-		return nil
+		return sfcf, nil
 	}
+	return nil, fmt.Errorf("unsupported stream filter type: %v", filterType)
+}
+
+// CreateNetworkFilterChainFactory creates a StreamFilterChainFactory according to filterType
+func CreateNetworkFilterChainFactory(filterType string, config map[string]interface{}, isV2 bool) (types.NetworkFilterChainFactory, error) {
+	if cf, ok := creatorNetworkFactory[filterType]; ok {
+		nfcf, err := cf(config, isV2)
+		if err != nil {
+			return nil, fmt.Errorf("create network filter chain factory failed: %v", err)
+		}
+		return nfcf, nil
+	}
+	return nil, fmt.Errorf("unsupported network filter type: %v", filterType)
 }

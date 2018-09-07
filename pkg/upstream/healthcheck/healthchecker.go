@@ -14,16 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package healthcheck
 
 import (
 	"math/rand"
 	"time"
 
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/types"
 	"github.com/rcrowley/go-metrics"
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/types"
 )
 
 type sessionFactory interface {
@@ -89,11 +90,11 @@ func (c *healthChecker) AddHostCheckCompleteCb(cb types.HealthCheckCb) {
 func (c *healthChecker) newSession(host types.Host) types.HealthCheckSession {
 	if c.sessionFactory != nil {
 		return c.sessionFactory.newSession(host)
-	} else {
-		return &healthCheckSession{
-			healthChecker: c,
-			host:          host,
-		}
+	}
+
+	return &healthCheckSession{
+		healthChecker: c,
+		host:          host,
 	}
 }
 

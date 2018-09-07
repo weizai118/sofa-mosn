@@ -14,8 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package types
 
+// Header key types
 const (
 	HeaderStatus        = "x-mosn-status"
 	HeaderMethod        = "x-mosn-method"
@@ -27,14 +29,18 @@ const (
 	HeaderTryTimeout    = "x-mosn-try-timeout"
 	HeaderException     = "x-mosn-exception"
 	HeaderStremEnd      = "x-mosn-endstream"
+	HeaderRpcService    = "x-mosn-rpc-service"
+	HeaderRpcMethod     = "x-mosn-rpc-method"
 )
 
+// Error messages
 const (
 	UnSupportedProCode   string = "Protocol Code not supported"
 	CodecException       string = "Codec exception occurs"
 	DeserializeException string = "Deserial exception occurs"
 )
 
+// Error codes
 const (
 	CodecExceptionCode    int = 0
 	UnknownCode           int = 2

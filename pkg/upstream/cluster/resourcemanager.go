@@ -14,12 +14,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package cluster
 
 import (
-	"github.com/alipay/sofamosn/pkg/types"
 	"sync/atomic"
-	"github.com/alipay/sofamosn/pkg/api/v2"
+
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 const (
@@ -44,7 +46,7 @@ func NewResourceManager(circuitBreakers v2.CircuitBreakers) types.ResourceManage
 	maxRequests := DefaultMaxRequests
 	maxRetries := DefaultMaxRetries
 
-	// note: we dont support group cb by priority
+	// note: we don't support group cb by priority
 	if circuitBreakers.Thresholds != nil && len(circuitBreakers.Thresholds) > 0 {
 		maxConnections = uint64(circuitBreakers.Thresholds[0].MaxConnections)
 		maxPendingRequests = uint64(circuitBreakers.Thresholds[0].MaxPendingRequests)

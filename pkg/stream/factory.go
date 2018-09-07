@@ -14,12 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package stream
 
 import (
 	"context"
 
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 var streamFactories map[types.Protocol]ProtocolStreamFactory
@@ -37,7 +38,7 @@ func CreateServerStreamConnection(context context.Context, prot types.Protocol, 
 
 	if ssc, ok := streamFactories[prot]; ok {
 		return ssc.CreateServerStream(context, connection, callbacks)
-	} else {
-		return nil
 	}
+
+	return nil
 }

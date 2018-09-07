@@ -14,33 +14,36 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package router
 
 import (
 	"container/list"
 	"regexp"
-
 	"sort"
 
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
-var ConfigUtilityInst = &ConfigUtility{}
+var ConfigUtilityInst = &configUtility{}
 
-type ConfigUtility struct {
+type configUtility struct {
 	types.HeaderData
-	QueryParameterMatcher
+	queryParameterMatcher
 }
 
 // types.MatchHeaders
-func (cu *ConfigUtility) MatchHeaders(requestHeaders map[string]string, configHeaders []*types.HeaderData) bool {
+func (cu *configUtility) MatchHeaders(requestHeaders map[string]string, configHeaders []*types.HeaderData) bool {
 
 	// step 1: match name
 	// step 2: match value, if regex true, match pattern
-	for _, cfgHeaderData := range configHeaders {
+	log.DefaultLogger.Debugf("MatchHeaders, request headers are:%+v", requestHeaders)
+
+	for i, cfgHeaderData := range configHeaders {
 		cfgName := cfgHeaderData.Name.Get()
 		cfgValue := cfgHeaderData.Value
+		log.DefaultLogger.Debugf("MatchHeaders, router headers %d name : %s, value %s:  ", i, cfgName, cfgValue)
 
 		if value, ok := requestHeaders[cfgName]; ok {
 
@@ -53,6 +56,8 @@ func (cu *ConfigUtility) MatchHeaders(requestHeaders map[string]string, configHe
 					return false
 				}
 			}
+		} else {
+			return false
 		}
 	}
 
@@ -60,7 +65,7 @@ func (cu *ConfigUtility) MatchHeaders(requestHeaders map[string]string, configHe
 }
 
 // types.MatchQueryParams
-func (cu *ConfigUtility) MatchQueryParams(queryParams types.QueryParams, configQueryParams []types.QueryParameterMatcher) bool {
+func (cu *configUtility) MatchQueryParams(queryParams types.QueryParams, configQueryParams []types.QueryParameterMatcher) bool {
 
 	for _, configQueryParam := range configQueryParams {
 
@@ -72,51 +77,54 @@ func (cu *ConfigUtility) MatchQueryParams(queryParams types.QueryParams, configQ
 	return true
 }
 
-type QueryParameterMatcher struct {
+type queryParameterMatcher struct {
 	name         string
 	value        string
 	isRegex      bool
 	regexPattern regexp.Regexp
 }
 
-func (qpm *QueryParameterMatcher) Matches(requestQueryParams types.QueryParams) bool {
+func (qpm *queryParameterMatcher) Matches(requestQueryParams types.QueryParams) bool {
+	requestQueryValue, ok := requestQueryParams[qpm.name]
 
-	if requestQueryValue, ok := requestQueryParams[qpm.name]; !ok {
+	if !ok {
 		return false
-	} else if qpm.isRegex {
-		return qpm.regexPattern.MatchString(requestQueryValue)
-	} else if qpm.value == "" {
-		return true
-	} else {
-		return qpm.value == requestQueryValue
 	}
 
-	return true
+	if qpm.isRegex {
+		return qpm.regexPattern.MatchString(requestQueryValue)
+	}
+
+	if qpm.value == "" {
+		return true
+	}
+
+	return qpm.value == requestQueryValue
 }
 
 // Implementation of Config that reads from a proto file.
-type ConfigImpl struct {
+type configImpl struct {
 	name                  string
-	routeMatcher          RouteMatcher
+	routeMatcher          routeMatcher
 	internalOnlyHeaders   *list.List
-	requestHeadersParser  *HeaderParser
-	responseHeadersParser *HeaderParser
+	requestHeadersParser  *headerParser
+	responseHeadersParser *headerParser
 }
 
-func (ci *ConfigImpl) Name() string {
+func (ci *configImpl) Name() string {
 	return ci.name
 }
 
-func (ci *ConfigImpl) Route(headers map[string]string, randomValue uint64) types.Route {
+func (ci *configImpl) Route(headers map[string]string, randomValue uint64) types.Route {
 	return ci.routeMatcher.Route(headers, randomValue)
 }
 
-func (ci *ConfigImpl) InternalOnlyHeaders() *list.List {
+func (ci *configImpl) InternalOnlyHeaders() *list.List {
 	return ci.internalOnlyHeaders
 }
 
-//
-func NewMetadataMatchCriteriaImpl(metadataMatches map[string]interface{}) *MetadataMatchCriteriaImpl {
+// NewMetadataMatchCriteriaImpl
+func NewMetadataMatchCriteriaImpl(metadataMatches map[string]string) *MetadataMatchCriteriaImpl {
 
 	metadataMatchCriteriaImpl := &MetadataMatchCriteriaImpl{}
 	metadataMatchCriteriaImpl.extractMetadataMatchCriteria(nil, metadataMatches)
@@ -124,7 +132,23 @@ func NewMetadataMatchCriteriaImpl(metadataMatches map[string]interface{}) *Metad
 	return metadataMatchCriteriaImpl
 }
 
-// realize sort.Sort
+// MetadataMatchCriteriaImpl class wrapper MatchCriteriaArray
+// which contains MatchCriteria in dictionary sorted
+type MetadataMatchCriteriaImpl struct {
+	MatchCriteriaArray []types.MetadataMatchCriterion
+}
+
+// MetadataMatchCriteria
+func (mmcti *MetadataMatchCriteriaImpl) MetadataMatchCriteria() []types.MetadataMatchCriterion {
+	return mmcti.MatchCriteriaArray
+}
+
+// MergeMatchCriteria
+// No usage currently
+func (mmcti *MetadataMatchCriteriaImpl) MergeMatchCriteria(metadataMatches map[string]interface{}) types.MetadataMatchCriteria {
+	return nil
+}
+
 func (mmcti *MetadataMatchCriteriaImpl) Len() int {
 	return len(mmcti.MatchCriteriaArray)
 }
@@ -138,24 +162,11 @@ func (mmcti *MetadataMatchCriteriaImpl) Swap(i, j int) {
 		mmcti.MatchCriteriaArray[i]
 }
 
-type MetadataMatchCriteriaImpl struct {
-	MatchCriteriaArray []types.MetadataMatchCriterion
-}
-
-func (mmcti *MetadataMatchCriteriaImpl) MetadataMatchCriteria() []types.MetadataMatchCriterion {
-	return mmcti.MatchCriteriaArray
-}
-
-func (mmcti *MetadataMatchCriteriaImpl) MergeMatchCriteria(metadataMatches map[string]interface{}) types.MetadataMatchCriteria {
-	return nil
-}
-
-// used to generate metadata match criteria from config
+// Used to generate metadata match criteria from config
 func (mmcti *MetadataMatchCriteriaImpl) extractMetadataMatchCriteria(parent *MetadataMatchCriteriaImpl,
-	metadataMatches map[string]interface{}) {
+	metadataMatches map[string]string) {
 
 	var mdMatchCriteria []types.MetadataMatchCriterion
-
 	// used to record key and its index for o(1) searching
 	var existingMap = make(map[string]uint32)
 
@@ -169,43 +180,38 @@ func (mmcti *MetadataMatchCriteriaImpl) extractMetadataMatchCriteria(parent *Met
 
 	// get from metadatamatch
 	for k, v := range metadataMatches {
+		mmci := &MetadataMatchCriterionImpl{
+			Name:  k,
+			Value: types.GenerateHashedValue(v),
+		}
 
-		if vs, ok := v.(string); ok {
-			mmci := &MetadataMatchCriterionImpl{
-				Name:  k,
-				Value: types.GenerateHashedValue(vs),
-			}
-
-			if index, ok := existingMap[k]; ok {
-
-				// update value
-				mdMatchCriteria[index] = mmci
-			} else {
-				// append
-				mdMatchCriteria = append(mdMatchCriteria, mmci)
-			}
-
+		if index, ok := existingMap[k]; ok {
+			// update value
+			mdMatchCriteria[index] = mmci
 		} else {
-			log.DefaultLogger.Errorf("Currently,metadata only support map[string]string type")
+			// append
+			mdMatchCriteria = append(mdMatchCriteria, mmci)
 		}
 	}
 
 	mmcti.MatchCriteriaArray = mdMatchCriteria
-
 	// sorting in lexically by name
 	sort.Sort(mmcti)
 }
 
-//
+// MetadataMatchCriterionImpl class contains the name and value of the metadata match criterion
+// Implement types.MetadataMatchCriterion
 type MetadataMatchCriterionImpl struct {
 	Name  string
 	Value types.HashedValue
 }
 
+// MetadataKeyName return name
 func (mmci *MetadataMatchCriterionImpl) MetadataKeyName() string {
 	return mmci.Name
 }
 
+// MetadataValue return value
 func (mmci *MetadataMatchCriterionImpl) MetadataValue() types.HashedValue {
 	return mmci.Value
 }

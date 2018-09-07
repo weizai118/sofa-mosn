@@ -14,15 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package sofarpc
 
 import (
 	"context"
 	"errors"
-	"reflect"
 
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 //All of the protocolMaps
@@ -46,7 +46,7 @@ func NewProtocols(protocolMaps map[byte]Protocol) types.Protocols {
 }
 
 //PROTOCOL LEVEL's Unified AppendHeaders for BOLTV1、BOLTV2、TR
-func (p *protocols) EncodeHeaders(context context.Context, headers interface{}) (error, types.IoBuffer) {
+func (p *protocols) EncodeHeaders(context context.Context, headers interface{}) (types.IoBuffer, error) {
 	var protocolCode byte
 
 	switch headers.(type) {
@@ -56,31 +56,31 @@ func (p *protocols) EncodeHeaders(context context.Context, headers interface{}) 
 		headersMap := headers.(map[string]string)
 
 		if proto, exist := headersMap[SofaPropertyHeader(HeaderProtocolCode)]; exist {
-			protoValue := ConvertPropertyValue(proto, reflect.Uint8)
-			protocolCode = protoValue.(byte)
+			protoValue := ConvertPropertyValueUint8(proto)
+			protocolCode = protoValue
 		} else {
 			errMsg := NoProCodeInHeader
 			log.ByContext(context).Errorf(errMsg)
 			err := errors.New(errMsg)
-			return err, nil
+			return nil, err
 		}
 	default:
 		errMsg := InvalidHeaderType
 		log.ByContext(context).Errorf(errMsg+" headers = %+v", headers)
 		err := errors.New(errMsg)
-		return err, nil
+		return nil, err
 	}
 
 	if proto, exists := p.protocolMaps[protocolCode]; exists {
 		//Return encoded data in map[string]string to stream layer
 		return proto.GetEncoder().EncodeHeaders(context, headers)
-	} else {
-		errMsg := types.UnSupportedProCode
-		err := errors.New(errMsg)
-		log.ByContext(context).Errorf(errMsg + "protocolCode = %s", protocolCode)
-
-		return err, nil
 	}
+
+	errMsg := types.UnSupportedProCode
+	err := errors.New(errMsg)
+	log.ByContext(context).Errorf(errMsg+"protocolCode = %s", protocolCode)
+
+	return nil, err
 }
 
 func (p *protocols) EncodeData(context context.Context, data types.IoBuffer) types.IoBuffer {
@@ -100,16 +100,14 @@ func (p *protocols) Decode(context context.Context, data types.IoBuffer, filter 
 		logger.Debugf("Decoderprotocol code = %x, maybeProtocolVersion = %x", protocolCode, maybeProtocolVersion)
 
 		if proto, exists := p.protocolMaps[protocolCode]; exists {
-			if read, cmd := proto.GetDecoder().Decode(context, data); cmd != nil {
+			if cmd, error := proto.GetDecoder().Decode(context, data); cmd != nil && error == nil {
 				if err := proto.GetCommandHandler().HandleCommand(context, cmd, filter); err != nil {
 					filter.OnDecodeError(err, nil)
 					break
 				}
-			} else if 0 == read {
-				// protocol type error
-				errMsg := UnKnownReqtype
-				logger.Errorf(errMsg+" "+"CmdCode = %+v", cmd)
-				filter.OnDecodeError(errors.New(errMsg), nil)
+			} else if error != nil {
+				// request type error, the second byte in protocol
+				filter.OnDecodeError(error, nil)
 				break
 			} else {
 				break
@@ -125,10 +123,9 @@ func (p *protocols) Decode(context context.Context, data types.IoBuffer, filter 
 
 func (p *protocols) RegisterProtocol(protocolCode byte, protocol Protocol) {
 	if _, exists := p.protocolMaps[protocolCode]; exists {
-		log.DefaultLogger.Warnf("protocol alreay Exist:", protocolCode)
+		log.DefaultLogger.Warnf("protocol already Exist:", protocolCode)
 	} else {
 		p.protocolMaps[protocolCode] = protocol
-		log.StartLogger.Debugf("register protocol:%x", protocolCode)
 	}
 }
 

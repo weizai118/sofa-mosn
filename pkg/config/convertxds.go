@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package config
 
 import (
@@ -22,6 +23,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/protocol"
+	xdsxproxy "github.com/alipay/sofa-mosn/pkg/xds-config-model/filter/network/x_proxy/v2"
 	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	xdsauth "github.com/envoyproxy/go-control-plane/envoy/api/v2/auth"
 	xdscluster "github.com/envoyproxy/go-control-plane/envoy/api/v2/cluster"
@@ -29,29 +34,26 @@ import (
 	xdsendpoint "github.com/envoyproxy/go-control-plane/envoy/api/v2/endpoint"
 	xdslistener "github.com/envoyproxy/go-control-plane/envoy/api/v2/listener"
 	xdsroute "github.com/envoyproxy/go-control-plane/envoy/api/v2/route"
-	xdsaccesslog "github.com/envoyproxy/go-control-plane/envoy/config/filter/accesslog/v2"
+	xdsaccesslog "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v2"
 	xdshttp "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/http_connection_manager/v2"
 	xdstcp "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/tcp_proxy/v2"
 	xdsutil "github.com/envoyproxy/go-control-plane/pkg/util"
 	"github.com/fatih/structs"
 	"github.com/gogo/protobuf/types"
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/protocol"
-	xdsxproxy "github.com/alipay/sofamosn/pkg/xds-config-model/filter/network/x_proxy/v2"
 )
 
-var supportFilter map[string]bool = map[string]bool{
+var supportFilter = map[string]bool{
 	xdsutil.HTTPConnectionManager: true,
 	v2.RPC_PROXY:                  true,
 	v2.X_PROXY:                    true,
 }
 
-var httpBaseConfig map[string]bool = map[string]bool{
+var httpBaseConfig = map[string]bool{
 	xdsutil.HTTPConnectionManager: true,
 	v2.RPC_PROXY:                  true,
 }
 
+// todo add streamfilters parse
 func convertListenerConfig(xdsListener *xdsapi.Listener) *v2.ListenerConfig {
 	if !isSupport(xdsListener) {
 		return nil
@@ -61,6 +63,7 @@ func convertListenerConfig(xdsListener *xdsapi.Listener) *v2.ListenerConfig {
 		Name:                                  xdsListener.GetName(),
 		Addr:                                  convertAddress(&xdsListener.Address),
 		BindToPort:                            convertBindToPort(xdsListener.GetDeprecatedV1()),
+		Inspector:                             true,
 		PerConnBufferLimitBytes:               xdsListener.GetPerConnectionBufferLimitBytes().GetValue(),
 		HandOffRestoredDestinationConnections: xdsListener.GetUseOriginalDst().GetValue(),
 		AccessLogs:                            convertAccessLogs(xdsListener),
@@ -78,7 +81,10 @@ func convertListenerConfig(xdsListener *xdsapi.Listener) *v2.ListenerConfig {
 	// it must be 1 filechains and 1 networkfilter by design
 	if listenerConfig.FilterChains != nil && len(listenerConfig.FilterChains) == 1 && listenerConfig.FilterChains[0].Filters != nil && len(listenerConfig.FilterChains[0].Filters) == 1 && listenerConfig.FilterChains[0].Filters[0].Config != nil {
 		if downstreamProtocol, ok := listenerConfig.FilterChains[0].Filters[0].Config["DownstreamProtocol"]; ok {
-			if value, ok := downstreamProtocol.(string); ok && value == string(protocol.Http2) {
+			// Note: as we use fasthttp and net/http2.0, the IO we created in mosn should be disabled
+			// in the future, if we realize these two protocol by-self, this this hack method should be removed
+			if value, ok := downstreamProtocol.(string); ok && (value == string(protocol.HTTP2) ||
+				value == string(protocol.HTTP1)) {
 				listenerConfig.DisableConnIo = true
 			}
 		}
@@ -139,9 +145,15 @@ func convertEndpointsConfig(xdsEndpoint *xdsendpoint.LocalityLbEndpoints) []v2.H
 		}
 		host := v2.Host{
 			Address:  address,
-			Weight:   xdsHost.GetLoadBalancingWeight().GetValue(),
 			MetaData: convertMeta(xdsHost.Metadata),
 		}
+
+		if weight := xdsHost.GetLoadBalancingWeight().GetValue(); weight < MinHostWeight {
+			host.Weight = MinHostWeight
+		} else if weight > MaxHostWeight {
+			host.Weight = MaxHostWeight
+		}
+
 		hosts = append(hosts, host)
 	}
 	return hosts
@@ -225,7 +237,7 @@ func convertAccessLogs(xdsListener *xdsapi.Listener) []v2.AccessLog {
 					}
 				}
 			} else {
-				log.DefaultLogger.Errorf("unsupport filter config type, filter name: %s", xdsFilter.GetName())
+				log.DefaultLogger.Errorf("unsupported filter config type, filter name: %s", xdsFilter.GetName())
 			}
 		}
 	}
@@ -272,8 +284,8 @@ func convertFilterConfig(name string, s *types.Struct) map[string]interface{} {
 		filterConfig := &xdshttp.HttpConnectionManager{}
 		xdsutil.StructToMessage(s, filterConfig)
 		proxyConfig := v2.Proxy{
-			DownstreamProtocol:  string(protocol.Http2),
-			UpstreamProtocol:    string(protocol.Http2),
+			DownstreamProtocol:  string(protocol.HTTP1),
+			UpstreamProtocol:    string(protocol.HTTP1),
 			SupportDynamicRoute: true,
 			VirtualHosts:        convertVirtualHosts(filterConfig.GetRouteConfig()),
 		}
@@ -282,8 +294,8 @@ func convertFilterConfig(name string, s *types.Struct) map[string]interface{} {
 		filterConfig := &xdshttp.HttpConnectionManager{}
 		xdsutil.StructToMessage(s, filterConfig)
 		proxyConfig := v2.Proxy{
-			DownstreamProtocol:  string(protocol.SofaRpc),
-			UpstreamProtocol:    string(protocol.SofaRpc),
+			DownstreamProtocol:  string(protocol.SofaRPC),
+			UpstreamProtocol:    string(protocol.SofaRPC),
 			SupportDynamicRoute: true,
 			VirtualHosts:        convertVirtualHosts(filterConfig.GetRouteConfig()),
 		}
@@ -292,16 +304,26 @@ func convertFilterConfig(name string, s *types.Struct) map[string]interface{} {
 		filterConfig := &xdsxproxy.XProxy{}
 		xdsutil.StructToMessage(s, filterConfig)
 		proxyConfig := v2.Proxy{
-			DownstreamProtocol:  filterConfig.GetDownstreamProtocol().String(),
-			UpstreamProtocol:    filterConfig.GetUpstreamProtocol().String(),
+			//DownstreamProtocol:  filterConfig.GetDownstreamProtocol().String(),
+			//UpstreamProtocol:    filterConfig.GetUpstreamProtocol().String(),
+			DownstreamProtocol:  string(protocol.Xprotocol),
+			UpstreamProtocol:    string(protocol.Xprotocol),
 			SupportDynamicRoute: true,
 			VirtualHosts:        convertVirtualHosts(filterConfig.GetRouteConfig()),
+			ExtendConfig:        convertXProxyExtendConfig(filterConfig),
 		}
 		return structs.Map(proxyConfig)
-	} else {
-		log.DefaultLogger.Errorf("unsupport filter config, filter name: %s", name)
 	}
+
+	log.DefaultLogger.Errorf("unsupported filter config, filter name: %s", name)
 	return nil
+}
+
+func convertXProxyExtendConfig(config *xdsxproxy.XProxy) map[string]interface{} {
+	extendConfig := &v2.XProxyExtendConfig{
+		SubProtocol: config.XProtocol,
+	}
+	return structs.Map(extendConfig)
 }
 
 func convertVirtualHosts(xdsRouteConfig *xdsapi.RouteConfiguration) []*v2.VirtualHost {
@@ -315,7 +337,7 @@ func convertVirtualHosts(xdsRouteConfig *xdsapi.RouteConfiguration) []*v2.Virtua
 			Name:            xdsVirtualHost.GetName(),
 			Domains:         xdsVirtualHost.GetDomains(),
 			Routers:         convertRoutes(xdsVirtualHost.GetRoutes()),
-			RequireTls:      xdsVirtualHost.GetRequireTls().String(),
+			RequireTLS:      xdsVirtualHost.GetRequireTls().String(),
 			VirtualClusters: convertVirtualClusters(xdsVirtualHost.GetVirtualClusters()),
 		}
 		virtualHosts = append(virtualHosts, virtualHost)
@@ -347,7 +369,7 @@ func convertRoutes(xdsRoutes []xdsroute.Route) []v2.Router {
 			}
 			routes = append(routes, route)
 		} else {
-			log.DefaultLogger.Errorf("unsupport route actin, just Route and Redirect support yet, ignore this route")
+			log.DefaultLogger.Errorf("unsupported route actin, just Route and Redirect support yet, ignore this route")
 			continue
 		}
 	}
@@ -395,7 +417,7 @@ func convertMeta(xdsMeta *xdscore.Metadata) v2.Metadata {
 	if xdsMeta == nil {
 		return nil
 	}
-	meta := make(map[string]interface{}, len(xdsMeta.GetFilterMetadata()))
+	meta := make(map[string]string, len(xdsMeta.GetFilterMetadata()))
 	for key, value := range xdsMeta.GetFilterMetadata() {
 		meta[key] = value.String()
 	}
@@ -430,7 +452,7 @@ func convertWeightedClusters(xdsWeightedClusters *xdsroute.WeightedCluster) []v2
 	weightedClusters := make([]v2.WeightedCluster, 0, len(xdsWeightedClusters.GetClusters()))
 	for _, cluster := range xdsWeightedClusters.GetClusters() {
 		weightedCluster := v2.WeightedCluster{
-			Clusters:         convertWeightedCluster(cluster),
+			Cluster:          convertWeightedCluster(cluster),
 			RuntimeKeyPrefix: xdsWeightedClusters.GetRuntimeKeyPrefix(),
 		}
 		weightedClusters = append(weightedClusters, weightedCluster)
@@ -515,14 +537,14 @@ func convertAddress(xdsAddress *xdscore.Address) net.Addr {
 func convertClusterType(xdsClusterType xdsapi.Cluster_DiscoveryType) v2.ClusterType {
 	switch xdsClusterType {
 	case xdsapi.Cluster_STATIC:
-		return v2.STATIC_CLUSTER
+		return v2.SIMPLE_CLUSTER
 	case xdsapi.Cluster_STRICT_DNS:
 	case xdsapi.Cluster_LOGICAL_DNS:
 	case xdsapi.Cluster_EDS:
-		return v2.DYNAMIC_CLUSTER
+		return v2.EDS_CLUSTER
 	case xdsapi.Cluster_ORIGINAL_DST:
 	}
-	//log.DefaultLogger.Fatalf("unsupported cluster type: %s, exchage to SIMPLE_CLUSTER", xdsClusterType.String())
+	//log.DefaultLogger.Fatalf("unsupported cluster type: %s, exchange to SIMPLE_CLUSTER", xdsClusterType.String())
 	return v2.SIMPLE_CLUSTER
 }
 
@@ -580,20 +602,23 @@ func convertHealthChecks(xdsHealthChecks []*xdscore.HealthCheck) v2.HealthCheck 
 	}
 
 	return v2.HealthCheck{
-		Timeout:            convertDuration(xdsHealthChecks[0].GetTimeout()),
+		Timeout:            *xdsHealthChecks[0].GetTimeout(),
 		HealthyThreshold:   xdsHealthChecks[0].GetHealthyThreshold().GetValue(),
 		UnhealthyThreshold: xdsHealthChecks[0].GetUnhealthyThreshold().GetValue(),
-		Interval:           convertDuration(xdsHealthChecks[0].GetInterval()),
+		Interval:           *xdsHealthChecks[0].GetInterval(),
 		IntervalJitter:     convertDuration(xdsHealthChecks[0].GetIntervalJitter()),
 	}
 }
 
 func convertCircuitBreakers(xdsCircuitBreaker *xdscluster.CircuitBreakers) v2.CircuitBreakers {
-	if xdsCircuitBreaker == nil {
+	if xdsCircuitBreaker == nil || xdsCircuitBreaker.Size() == 0 {
 		return v2.CircuitBreakers{}
 	}
 	thresholds := make([]v2.Thresholds, 0, len(xdsCircuitBreaker.GetThresholds()))
 	for _, xdsThreshold := range xdsCircuitBreaker.GetThresholds() {
+		if xdsThreshold.Size() == 0 {
+			continue
+		}
 		threshold := v2.Thresholds{
 			Priority:           v2.RoutingPriority(xdsThreshold.GetPriority().String()),
 			MaxConnections:     xdsThreshold.GetMaxConnections().GetValue(),
@@ -609,11 +634,11 @@ func convertCircuitBreakers(xdsCircuitBreaker *xdscluster.CircuitBreakers) v2.Ci
 }
 
 func convertOutlierDetection(xdsOutlierDetection *xdscluster.OutlierDetection) v2.OutlierDetection {
-	if xdsOutlierDetection == nil {
+	if xdsOutlierDetection == nil || xdsOutlierDetection.Size() == 0 {
 		return v2.OutlierDetection{}
 	}
 	return v2.OutlierDetection{
-		Consecutive_5Xx:                    xdsOutlierDetection.GetConsecutive_5Xx().GetValue(),
+		Consecutive5xx:                     xdsOutlierDetection.GetConsecutive_5Xx().GetValue(),
 		Interval:                           convertDuration(xdsOutlierDetection.GetInterval()),
 		BaseEjectionTime:                   convertDuration(xdsOutlierDetection.GetBaseEjectionTime()),
 		MaxEjectionPercent:                 xdsOutlierDetection.GetMaxEjectionPercent().GetValue(),
@@ -668,21 +693,21 @@ func convertDuration(p *types.Duration) time.Duration {
 	return d
 }
 
-func convertTLS(xdsTlsContext interface{}) v2.TLSConfig {
+func convertTLS(xdsTLSContext interface{}) v2.TLSConfig {
 	var config v2.TLSConfig
 	var isDownstream bool
 	var common *xdsauth.CommonTlsContext
 
-	if xdsTlsContext == nil {
+	if xdsTLSContext == nil {
 		return config
 	}
-	if context, ok := xdsTlsContext.(*xdsauth.DownstreamTlsContext); ok {
+	if context, ok := xdsTLSContext.(*xdsauth.DownstreamTlsContext); ok {
 		if context.GetRequireClientCertificate() != nil {
 			config.VerifyClient = context.GetRequireClientCertificate().GetValue()
 		}
 		common = context.GetCommonTlsContext()
 		isDownstream = true
-	} else if context, ok := xdsTlsContext.(*xdsauth.UpstreamTlsContext); ok {
+	} else if context, ok := xdsTLSContext.(*xdsauth.UpstreamTlsContext); ok {
 		config.ServerName = context.GetSni()
 		common = context.GetCommonTlsContext()
 		isDownstream = false
@@ -725,6 +750,5 @@ func convertTLS(xdsTlsContext interface{}) v2.TLSConfig {
 	}
 
 	config.Status = true
-	config.Inspector = true
 	return config
 }

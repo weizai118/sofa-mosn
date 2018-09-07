@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package types
 
 import "context"
@@ -81,8 +82,10 @@ import "context"
 //    --------------------------------------------------------------------------------------------------------------
 //
 
+// StreamResetReason defines the reason why stream reset
 type StreamResetReason string
 
+// Group of stream reset reasons
 const (
 	StreamConnectionTermination StreamResetReason = "ConnectionTermination"
 	StreamConnectionFailed      StreamResetReason = "ConnectionFailed"
@@ -91,24 +94,25 @@ const (
 	StreamRemoteReset           StreamResetReason = "StreamRemoteReset"
 )
 
-// Core model in stream layer, a generic protocol stream
+// Stream is a generic protocol stream, it is the core model in stream layer
 type Stream interface {
-	// Add stream event listener
+	// AddEventListener adds stream event listener
 	AddEventListener(streamEventListener StreamEventListener)
 
-	// Remove stream event listener
+	// RemoveEventListener removes stream event listener
 	RemoveEventListener(streamEventListener StreamEventListener)
 
-	// Reset stream. Any registered StreamEventListener.OnResetStream should be called.
+	// ResetStream rests stream
+	// Any registered StreamEventListener.OnResetStream should be called.
 	ResetStream(reason StreamResetReason)
 
-	// Enable/disable further stream data
+	// ReadDisable enable/disable further stream data
 	ReadDisable(disable bool)
 }
 
-// Stream event listener
+// StreamEventListener is a stream event listener
 type StreamEventListener interface {
-	// Called on a stream is been reset
+	// OnResetStream is called on a stream is been reset
 	OnResetStream(reason StreamResetReason)
 }
 
@@ -118,39 +122,38 @@ type StreamEventListener interface {
 type StreamSender interface {
 	// Append headers
 	// endStream supplies whether this is a header only request/response
-	AppendHeaders(headers interface{}, endStream bool) error
+	AppendHeaders(context context.Context, headers interface{}, endStream bool) error
 
 	// Append data
 	// endStream supplies whether this is the last data frame
-	AppendData(data IoBuffer, endStream bool) error
+	AppendData(context context.Context, data IoBuffer, endStream bool) error
 
 	// Append trailers, implicitly ends the stream.
-	AppendTrailers(trailers map[string]string) error
+	AppendTrailers(context context.Context, trailers map[string]string) error
 
 	// Get related stream
 	GetStream() Stream
 }
 
+// StreamReceiver handles request on server scenario, handles response on client scenario.
 // Listeners called on decode stream event
-// On server scenario, StreamReceiver handles request
-// On client scenario, StreamReceiver handles response
 type StreamReceiver interface {
-	// Called with decoded headers
+	// OnReceiveHeaders is called with decoded headers
 	// endStream supplies whether this is a header only request/response
-	OnReceiveHeaders(headers map[string]string, endOfStream bool)
+	OnReceiveHeaders(context context.Context, headers map[string]string, endOfStream bool)
 
-	// Called with a decoded data
+	// OnReceiveData is called with a decoded data
 	// endStream supplies whether this is the last data
-	OnReceiveData(data IoBuffer, endOfStream bool)
+	OnReceiveData(context context.Context, data IoBuffer, endOfStream bool)
 
-	// Called with a decoded trailers frame, implicitly ends the stream.
-	OnReceiveTrailers(trailers map[string]string)
+	// OnReceiveTrailers is called with a decoded trailers frame, implicitly ends the stream.
+	OnReceiveTrailers(context context.Context, trailers map[string]string)
 
-	// Called with when exception occurs
-	OnDecodeError(err error, headers map[string]string)
+	// OnDecodeError is called with when exception occurs
+	OnDecodeError(context context.Context, err error, headers map[string]string)
 }
 
-// A connection runs multiple streams
+// StreamConnection is a connection runs multiple streams
 type StreamConnection interface {
 	// Dispatch incoming data
 	// On data read scenario, it connects connection and stream by dispatching read buffer to stream,
@@ -160,168 +163,173 @@ type StreamConnection interface {
 	// Protocol on the connection
 	Protocol() Protocol
 
-	// Send go away to remote for graceful shutdown
+	// GoAway sends go away to remote for graceful shutdown
 	GoAway()
 }
 
-// A server side stream connection.
+// ServerStreamConnection is a server side stream connection.
 type ServerStreamConnection interface {
 	StreamConnection
 }
 
-// A client side stream connection.
+// ClientStreamConnection is a client side stream connection.
 type ClientStreamConnection interface {
 	StreamConnection
 
-	// Create a new outgoing request stream
+	// NewStream creates a new outgoing request stream
 	// responseDecoder supplies the decoder listeners on decode event
 	// StreamSender supplies the encoder to write the request
-	NewStream(streamId string, responseDecoder StreamReceiver) StreamSender
+	NewStream(context context.Context, streamID string, responseDecoder StreamReceiver) StreamSender
 }
 
-// Stream connection event listener
+// StreamConnectionEventListener is a stream connection event listener
 type StreamConnectionEventListener interface {
-	// Called on remote sends 'go away'
+	// OnGoAway is called on remote sends 'go away'
 	OnGoAway()
 }
 
-// Stream connection event listener for server connection
+// ServerStreamConnectionEventListener is a stream connection event listener for server connection
 type ServerStreamConnectionEventListener interface {
 	StreamConnectionEventListener
 
-	// return request stream decoder
-	NewStream(streamId string, responseEncoder StreamSender) StreamReceiver
+	// NewStream returns request stream decoder
+	NewStream(context context.Context, streamID string, responseEncoder StreamSender) StreamReceiver
 }
 
 type StreamFilterBase interface {
 	OnDestroy()
 }
 
-// Called by stream filter to interact with underlying stream
+// StreamFilterCallbacks is called by stream filter to interact with underlying stream
 type StreamFilterCallbacks interface {
-	// the originating connection
+	// Connection returns the originating connection
 	Connection() Connection
 
-	// Reset the underlying stream
+	// ResetStream resets the underlying stream
 	ResetStream()
 
-	// Route for current stream
+	// Route returns a route for current stream
 	Route() Route
 
-	// Get stream id
-	StreamId() string
+	// StreamID returns stream id
+	StreamID() string
 
-	// Request info related to the stream
+	// RequestInfo returns request info related to the stream
 	RequestInfo() RequestInfo
 }
 
-// Stream encoder filter
+// StreamSenderFilter is a stream sender filter
 type StreamSenderFilter interface {
 	StreamFilterBase
 
-	// Encode headers
+	// AppendHeaders encodes headers
 	// endStream supplies whether this is a header only request/response
 	AppendHeaders(headers interface{}, endStream bool) FilterHeadersStatus
 
-	// Called with data to be encoded
+	// AppendData encodes data
 	// endStream supplies whether this is the last data
 	AppendData(buf IoBuffer, endStream bool) FilterDataStatus
 
-	// Called with trailers to be encoded, implicitly ending the stream
+	// AppendTrailers encodes trailers, implicitly ending the stream
 	AppendTrailers(trailers map[string]string) FilterTrailersStatus
 
-	// Set StreamSenderFilterCallbacks
+	// SetEncoderFilterCallbacks sets the StreamSenderFilterCallbacks
 	SetEncoderFilterCallbacks(cb StreamSenderFilterCallbacks)
 }
 
+// StreamSenderFilterCallbacks is a StreamFilterCallbacks wrapper
 type StreamSenderFilterCallbacks interface {
 	StreamFilterCallbacks
 
-	// Continue iterating through the filter chain with buffered headers and body data
+	// ContinueEncoding continue iterating through the filter chain with buffered headers and body data
 	ContinueEncoding()
 
-	// data buffered by this filter or previous ones in the filter chain
+	// EncodingBuffer returns data buffered by this filter or previous ones in the filter chain
 	EncodingBuffer() IoBuffer
 
-	// Add buffered body data
+	// AddEncodedData adds buffered body data
 	AddEncodedData(buf IoBuffer, streamingFilter bool)
 
-	// Set the buffer limit
+	// SetEncoderBufferLimit sets the buffer limit
 	SetEncoderBufferLimit(limit uint32)
 
-	// Get buffer limit
+	// EncoderBufferLimit returns buffer limit
 	EncoderBufferLimit() uint32
 }
 
-// Stream decoder filter
+// StreamReceiverFilter is a StreamFilterBase wrapper
 type StreamReceiverFilter interface {
 	StreamFilterBase
 
-	// Called with decoded headers
+	// OnDecodeHeaders is called with decoded headers
 	// endStream supplies whether this is a header only request/response
 	OnDecodeHeaders(headers map[string]string, endStream bool) FilterHeadersStatus
 
-	// Called with a decoded data
+	// OnDecodeData is called with a decoded data
 	// endStream supplies whether this is the last data
 	OnDecodeData(buf IoBuffer, endStream bool) FilterDataStatus
 
-	// Called with decoded trailers, implicitly ending the stream
+	// OnDecodeTrailers is called with decoded trailers, implicitly ending the stream
 	OnDecodeTrailers(trailers map[string]string) FilterTrailersStatus
 
-	// Set decoder filter callbacks
+	// SetDecoderFilterCallbacks sets decoder filter callbacks
 	SetDecoderFilterCallbacks(cb StreamReceiverFilterCallbacks)
 }
 
-// Stream decoder filter callbacks add additional callbacks that allow a decoding filter to restart
+// StreamReceiverFilterCallbacks add additional callbacks that allow a decoding filter to restart
 // decoding if they decide to hold data
 type StreamReceiverFilterCallbacks interface {
 	StreamFilterCallbacks
 
-	// Continue iterating through the filter chain with buffered headers and body data
+	// ContinueDecoding continue iterating through the filter chain with buffered headers and body data
 	// It can only be called if decode process has been stopped by current filter, using StopIteration from decodeHeaders() or StopIterationAndBuffer or StopIterationNoBuffer from decodeData()
 	// The controller will dispatch headers and any buffered body data to the next filter in the chain.
 	ContinueDecoding()
 
-	// data buffered by this filter or previous ones in the filter chain
-	// Nil if nothing has been buffered
+	// DecodingBuffer returns data buffered by this filter or previous ones in the filter chain,
+	// if nothing has been buffered, returns nil
 	DecodingBuffer() IoBuffer
 
-	// Add buffered body data
+	// AddDecodedData add s buffered body data
 	AddDecodedData(buf IoBuffer, streamingFilter bool)
 
-	// Called with headers to be encoded, optionally indicating end of stream
+	// AppendHeaders is called with headers to be encoded, optionally indicating end of stream
 	// Filter uses this function to send out request/response headers of the stream
 	// endStream supplies whether this is a header only request/response
 	AppendHeaders(headers interface{}, endStream bool)
 
-	// Called with data to be encoded, optionally indicating end of stream.
+	// AppendData is called with data to be encoded, optionally indicating end of stream.
 	// Filter uses this function to send out request/response data of the stream
 	// endStream supplies whether this is the last data
 	AppendData(buf IoBuffer, endStream bool)
 
-	// Called with trailers to be encoded, implicitly ends the stream.
+	// AppendTrailers is called with trailers to be encoded, implicitly ends the stream.
 	// Filter uses this function to send out request/response trailers of the stream
 	AppendTrailers(trailers map[string]string)
 
-	// Set the buffer limit for decoder filters
+	// SetDecoderBufferLimit sets the buffer limit for decoder filters
 	SetDecoderBufferLimit(limit uint32)
 
-	// Get decoder buffer limit
+	// DecoderBufferLimit returns the decoder buffer limit
 	DecoderBufferLimit() uint32
 }
 
+// StreamFilterChainFactory adds filter into callbacks
 type StreamFilterChainFactory interface {
-	CreateFilterChain(context context.Context, callbacks FilterChainFactoryCallbacks)
+	CreateFilterChain(context context.Context, callbacks StreamFilterChainFactoryCallbacks)
 }
 
-type FilterChainFactoryCallbacks interface {
+// StreamFilterChainFactoryCallbacks is called in StreamFilterChainFactory
+type StreamFilterChainFactoryCallbacks interface {
 	AddStreamSenderFilter(filter StreamSenderFilter)
 
 	AddStreamReceiverFilter(filter StreamReceiverFilter)
 }
 
+// FilterHeadersStatus type
 type FilterHeadersStatus string
 
+// FilterHeadersStatus types
 const (
 	// Continue filter chain iteration.
 	FilterHeadersStatusContinue FilterHeadersStatus = "Continue"
@@ -329,8 +337,10 @@ const (
 	FilterHeadersStatusStopIteration FilterHeadersStatus = "StopIteration"
 )
 
+// FilterDataStatus type
 type FilterDataStatus string
 
+// FilterDataStatus types
 const (
 	// Continue filter chain iteration
 	FilterDataStatusContinue FilterDataStatus = "Continue"
@@ -342,8 +352,10 @@ const (
 	FilterDataStatusStopIterationNoBuffer FilterDataStatus = "StopIterationNoBuffer"
 )
 
+// FilterTrailersStatus type
 type FilterTrailersStatus string
 
+// FilterTrailersStatus types
 const (
 	// Continue filter chain iteration
 	FilterTrailersStatusContinue FilterTrailersStatus = "Continue"
@@ -351,28 +363,29 @@ const (
 	FilterTrailersStatusStopIteration FilterTrailersStatus = "StopIteration"
 )
 
+// PoolFailureReason type
 type PoolFailureReason string
 
+// PoolFailureReason types
 const (
 	Overflow          PoolFailureReason = "Overflow"
 	ConnectionFailure PoolFailureReason = "ConnectionFailure"
 )
 
+//  ConnectionPool is a connection pool interface to extend various of protocols
 type ConnectionPool interface {
 	Protocol() Protocol
 
-	DrainConnections()
-
-	NewStream(context context.Context, streamId string,
+	NewStream(context context.Context, streamID string,
 		responseDecoder StreamReceiver, cb PoolEventListener) Cancellable
 
 	Close()
 }
 
 type PoolEventListener interface {
-	OnFailure(streamId string, reason PoolFailureReason, host Host)
+	OnFailure(streamID string, reason PoolFailureReason, host Host)
 
-	OnReady(streamId string, requestEncoder StreamSender, host Host)
+	OnReady(streamID string, requestEncoder StreamSender, host Host)
 }
 
 type Cancellable interface {

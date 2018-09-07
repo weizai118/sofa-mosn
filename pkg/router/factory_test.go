@@ -14,16 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package router
 
 import (
 	"reflect"
 	"testing"
 
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
-func TestRegisteRouterConfigFactory(t *testing.T) {
+func TestRegisterRouterConfigFactory(t *testing.T) {
 	type args struct {
 		port    types.Protocol
 		factory configFactory
@@ -36,7 +37,7 @@ func TestRegisteRouterConfigFactory(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			RegisteRouterConfigFactory(tt.args.port, tt.args.factory)
+			RegisterRouterConfigFactory(tt.args.port, tt.args.factory)
 		})
 	}
 }

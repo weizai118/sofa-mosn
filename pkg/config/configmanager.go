@@ -14,11 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package config
 
 import (
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
 )
 
 // dumper provides basic operation with mosn elements, like 'cluster', to write back the config file with dynamic changes
@@ -35,6 +36,8 @@ import (
 // 3. bridge module get biz info(like service subscribe/publish, application info) from callback invocations
 // 4. biz module(like confreg) get biz info from bridge module directly
 
+// ResetServiceRegistryInfo
+// called when reset service registry info received
 func ResetServiceRegistryInfo(appInfo v2.ApplicationInfo, subServiceList []string) {
 	// reset service info
 	config.ServiceRegistry.ServiceAppInfo = ServiceAppInfoConfig{
@@ -47,15 +50,17 @@ func ResetServiceRegistryInfo(appInfo v2.ApplicationInfo, subServiceList []strin
 	config.ServiceRegistry.ServicePubInfo = []ServicePubInfoConfig{}
 
 	// delete subInfo / dynamic clusters
-	RemoveClusterConfig(subServiceList)
+	removeClusterConfig(subServiceList)
 }
 
+// AddClusterConfig
+// called when add cluster config info received
 func AddClusterConfig(clusters []v2.Cluster) {
 	for _, cluster := range clusters {
 		clusterConfig := convertClusterConfig(cluster)
 		exist := false
 
-		for i, _ := range config.ClusterManager.Clusters {
+		for i := range config.ClusterManager.Clusters {
 			// rewrite cluster's info if exist already
 			if config.ClusterManager.Clusters[i].Name == clusterConfig.Name {
 				config.ClusterManager.Clusters[i] = clusterConfig
@@ -72,10 +77,10 @@ func AddClusterConfig(clusters []v2.Cluster) {
 		// update routes
 		//AddRouterConfig(cluster.Name)
 	}
-	go Dump(true)
+	go dump(true)
 }
 
-func RemoveClusterConfig(clusterNames []string) {
+func removeClusterConfig(clusterNames []string) {
 	dirty := false
 
 	for _, clusterName := range clusterNames {
@@ -89,9 +94,11 @@ func RemoveClusterConfig(clusterNames []string) {
 		}
 	}
 
-	go Dump(dirty)
+	go dump(dirty)
 }
 
+// AddPubInfo
+// called when add pub info received
 func AddPubInfo(pubInfoAdded map[string]string) {
 	for srvName, srvData := range pubInfoAdded {
 		exist := false
@@ -100,7 +107,7 @@ func AddPubInfo(pubInfoAdded map[string]string) {
 			PubData:     srvData,
 		}
 
-		for i, _ := range config.ServiceRegistry.ServicePubInfo {
+		for i := range config.ServiceRegistry.ServicePubInfo {
 			// rewrite cluster's info
 			if config.ServiceRegistry.ServicePubInfo[i].ServiceName == srvName {
 				config.ServiceRegistry.ServicePubInfo[i] = srvPubInfo
@@ -114,9 +121,11 @@ func AddPubInfo(pubInfoAdded map[string]string) {
 		}
 	}
 
-	go Dump(true)
+	go dump(true)
 }
 
+// DelPubInfo
+// called when delete publish info received
 func DelPubInfo(serviceName string) {
 	dirty := false
 
@@ -129,7 +138,7 @@ func DelPubInfo(serviceName string) {
 		}
 	}
 
-	go Dump(dirty)
+	go dump(dirty)
 }
 
 // ~ convert functions, api.v2 model -> config model
@@ -174,8 +183,8 @@ func convertClusterHealthCheck(cchc v2.HealthCheck) ClusterHealthCheckConfig {
 	}
 }
 
-// todo: add router config delete
-
+// AddRouterConfig
+// Add router from config when new cluster created
 func AddRouterConfig(clusterName string) {
 	routerName := clusterName[0 : len(clusterName)-8]
 

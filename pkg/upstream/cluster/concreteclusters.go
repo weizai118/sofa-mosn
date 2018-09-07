@@ -14,14 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package cluster
 
 import (
 	"net"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 type dynamicClusterBase struct {
@@ -81,8 +82,8 @@ type simpleInMemCluster struct {
 	hosts []types.Host
 }
 
-func newSimpleInMemCluster(clusterConfig v2.Cluster, sourceAddr net.Addr, addedViaApi bool) *simpleInMemCluster {
-	cluster := newCluster(clusterConfig, sourceAddr, addedViaApi, nil)
+func newSimpleInMemCluster(clusterConfig v2.Cluster, sourceAddr net.Addr, addedViaAPI bool) *simpleInMemCluster {
+	cluster := newCluster(clusterConfig, sourceAddr, addedViaAPI, nil)
 
 	return &simpleInMemCluster{
 		dynamicClusterBase: dynamicClusterBase{
@@ -100,15 +101,7 @@ func (sc *simpleInMemCluster) UpdateHosts(newHosts []types.Host) {
 	copy(curHosts, sc.hosts)
 	changed, finalHosts, hostsAdded, hostsRemoved := sc.updateDynamicHostList(newHosts, curHosts)
 
-	if len(finalHosts) == 0 {
-		log.DefaultLogger.Debugf("final host is []")
-	}
-
-	for i, f := range finalHosts {
-		log.DefaultLogger.Debugf("final host index = %d, address = %s,", i, f.AddressString())
-	}
-
-	log.DefaultLogger.Debugf("changed %s", changed)
+	log.DefaultLogger.Debugf("update host changed %t", changed)
 
 	if changed {
 		sc.hosts = finalHosts

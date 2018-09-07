@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package network
 
 import (
@@ -22,10 +23,9 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/tls"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 // listener impl based on golang net package
@@ -39,7 +39,7 @@ type listener struct {
 	cb                                    types.ListenerEventListener
 	rawl                                  *net.TCPListener
 	logger                                log.Logger
-	tlsMng                                types.TLSContextManager
+	config                                *v2.ListenerConfig
 }
 
 func NewListener(lc *v2.ListenerConfig, logger log.Logger) types.Listener {
@@ -52,16 +52,22 @@ func NewListener(lc *v2.ListenerConfig, logger log.Logger) types.Listener {
 		perConnBufferLimitBytes:               lc.PerConnBufferLimitBytes,
 		handOffRestoredDestinationConnections: lc.HandOffRestoredDestinationConnections,
 		logger: logger,
+		config: lc,
 	}
 
 	if lc.InheritListener != nil {
 		//inherit old process's listener
 		l.rawl = lc.InheritListener
 	}
-
-	l.tlsMng = tls.NewTLSServerContextManager(lc.FilterChains, l, logger)
-
 	return l
+}
+
+func (l *listener) Config() *v2.ListenerConfig {
+	return l.config
+}
+
+func (l *listener) SetConfig(config *v2.ListenerConfig) {
+	l.config = config
 }
 
 func (l *listener) Name() string {
@@ -109,12 +115,16 @@ func (l *listener) Start(lctx context.Context) {
 	}
 }
 
-func (l *listener) Stop() {
-	l.rawl.SetDeadline(time.Now())
+func (l *listener) Stop() error {
+	return l.rawl.SetDeadline(time.Now())
 }
 
 func (l *listener) ListenerTag() uint64 {
 	return l.listenerTag
+}
+
+func (l *listener) SetListenerTag(tag uint64) {
+	l.listenerTag = tag
 }
 
 func (l *listener) ListenerFD() (uintptr, error) {
@@ -123,7 +133,7 @@ func (l *listener) ListenerFD() (uintptr, error) {
 		l.logger.Errorf(" listener %s fd not found : %v", l.name, err)
 		return 0, err
 	}
-	defer file.Close()
+	//defer file.Close()
 	return file.Fd(), nil
 }
 
@@ -131,8 +141,20 @@ func (l *listener) PerConnBufferLimitBytes() uint32 {
 	return l.perConnBufferLimitBytes
 }
 
+func (l *listener) SetePerConnBufferLimitBytes(limitBytes uint32) {
+	l.perConnBufferLimitBytes = limitBytes
+}
+
 func (l *listener) SetListenerCallbacks(cb types.ListenerEventListener) {
 	l.cb = cb
+}
+
+func (l *listener) GetListenerCallbacks() types.ListenerEventListener {
+	return l.cb
+}
+
+func (l *listener) SethandOffRestoredDestinationConnections(restoredDestation bool) {
+	l.handOffRestoredDestinationConnections = restoredDestation
 }
 
 func (l *listener) Close(lctx context.Context) error {
@@ -170,11 +192,7 @@ func (l *listener) accept(lctx context.Context) error {
 			}
 		}()
 
-		if l.tlsMng != nil && l.tlsMng.Enabled() {
-			rawc = l.tlsMng.Conn(rawc)
-		}
-
-		l.cb.OnAccept(rawc, l.handOffRestoredDestinationConnections, nil)
+		l.cb.OnAccept(rawc, l.handOffRestoredDestinationConnections, nil, nil, nil)
 	}()
 
 	return nil

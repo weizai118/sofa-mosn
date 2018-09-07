@@ -14,24 +14,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package types
 
+// ContextKey type
 type ContextKey string
 
+// Context key types
 const (
-	ContextKeyStreamId                   ContextKey = "StreamId"
-	ContextKeyConnectionId               ContextKey = "ConnectionId"
-	ContextKeyListenerPort               ContextKey = "ListenerPort"
-	ContextKeyListenerName               ContextKey = "ListenerName"
-	ContextKeyListenerStatsNameSpace     ContextKey = "ListenerStatsNameSpace"
-	ContextKeyNetworkFilterChainFactory  ContextKey = "NetworkFilterChainFactory"
-	ContextKeyStreamFilterChainFactories ContextKey = "StreamFilterChainFactory"
-	ContextKeyConnectionCodecMapPool     ContextKey = "ContextKeyConnectionCodecMapPool"
-	ContextKeyLogger                     ContextKey = "Logger"
-	ContextKeyAccessLogs                 ContextKey = "AccessLogs"
-	ContextOriRemoteAddr                 ContextKey = "OriRemoteAddr"
+	ContextKeyStreamID                    ContextKey = "StreamId"
+	ContextKeyConnectionID                ContextKey = "ConnectionId"
+	ContextKeyListenerPort                ContextKey = "ListenerPort"
+	ContextKeyListenerName                ContextKey = "ListenerName"
+	ContextKeyListenerStatsNameSpace      ContextKey = "ListenerStatsNameSpace"
+	ContextKeyNetworkFilterChainFactories ContextKey = "NetworkFilterChainFactory"
+	ContextKeyStreamFilterChainFactories  ContextKey = "StreamFilterChainFactory"
+	ContextKeyBufferPoolCtx               ContextKey = "ConnectionBufferPoolCtx"
+	ContextKeyLogger                      ContextKey = "Logger"
+	ContextKeyAccessLogs                  ContextKey = "AccessLogs"
+	ContextOriRemoteAddr                  ContextKey = "OriRemoteAddr"
+	ContextKeyAcceptChan                  ContextKey = "ContextKeyAcceptChan"
+	ContextKeyAcceptBuffer                ContextKey = "ContextKeyAcceptBuffer"
+	ContextKeyConnectionFd                ContextKey = "ConnectionFd"
+	ContextSubProtocol                    ContextKey = "ContextSubProtocol"
 )
 
 const (
+	// GlobalStatsNamespace is the stats namespace
 	GlobalStatsNamespace = ""
 )

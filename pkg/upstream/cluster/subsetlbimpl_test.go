@@ -1,14 +1,31 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package cluster
 
 import (
+	"net"
 	"reflect"
 	"testing"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/router"
-	"github.com/alipay/sofamosn/pkg/types"
-	"net"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/router"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 // we test following cases form envoy's example
@@ -66,7 +83,7 @@ var SubsetLbExample = subSetLoadBalancer{
 // passed
 // test fallback subset creation
 func Test_subSetLoadBalancer_UpdateFallbackSubset(t *testing.T) {
-	
+
 	hostSet := InitExampleHosts()
 	type args struct {
 		priority     uint32
@@ -90,21 +107,21 @@ func Test_subSetLoadBalancer_UpdateFallbackSubset(t *testing.T) {
 			},
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			
+
 			sslb := SubsetLbExample
 			sslb.UpdateFallbackSubset(tt.args.priority, tt.args.hostAdded, tt.args.hostsRemoved)
-			
+
 			for idx, host := range sslb.fallbackSubset.prioritySubset.GetOrCreateHostSubset(0).Hosts() {
-				
+
 				if host.Hostname() != tt.want[idx].Hostname() {
 					t.Errorf("Test_subSetLoadBalancer_UpdateFallbackSubset Error, got = %v, want %v", host,
 						tt.want[idx])
 				}
 			}
-			
+
 		})
 	}
 }
@@ -436,7 +453,7 @@ func Test_subSetLoadBalancer_ChooseHost(t *testing.T) {
 					},
 				},
 			},
-			want: hostSet[0], // defualt host: e1, e2
+			want: hostSet[0], // default host: e1, e2
 		},
 	}
 
@@ -445,9 +462,7 @@ func Test_subSetLoadBalancer_ChooseHost(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			got := sslb.ChooseHost(tt.args.context)
-
 			if got.AddressString() != tt.want.AddressString() {
 				t.Errorf("subSetLoadBalancer.ChooseHost() = %v, want %v", got.AddressString(), tt.want.AddressString())
 			}
@@ -523,7 +538,7 @@ func TestGenerateDftSubsetKeys(t *testing.T) {
 	type args struct {
 		dftkeys types.SortedMap
 	}
-	
+
 	tests := []struct {
 		name string
 		args args
@@ -532,11 +547,10 @@ func TestGenerateDftSubsetKeys(t *testing.T) {
 		{
 			name: "test1",
 			args: args{
-				dftkeys:
-					[]types.SortedPair{
-						{"stage","prod"},
-						{"type", "std",},
-						{"version", "1.0"},
+				dftkeys: []types.SortedPair{
+					{"stage", "prod"},
+					{"type", "std"},
+					{"version", "1.0"},
 				},
 			},
 			want: InitDefaultSubsetMetadata(),
@@ -584,7 +598,7 @@ func InitExampleHosts() []types.Host {
 		Hostname: "e1",
 		Address:  HostAddress[0],
 		Weight:   100,
-		MetaData: map[string]interface{}{
+		MetaData: map[string]string{
 			"stage":   "prod",
 			"version": "1.0",
 			"type":    "std",
@@ -597,7 +611,7 @@ func InitExampleHosts() []types.Host {
 		Hostname: "e2",
 		Address:  HostAddress[1],
 		Weight:   100,
-		MetaData: map[string]interface{}{
+		MetaData: map[string]string{
 			"stage":   "prod",
 			"version": "1.0",
 			"type":    "std",
@@ -609,7 +623,7 @@ func InitExampleHosts() []types.Host {
 		Hostname: "e3",
 		Address:  HostAddress[2],
 		Weight:   100,
-		MetaData: map[string]interface{}{
+		MetaData: map[string]string{
 			"stage":   "prod",
 			"version": "1.1",
 			"type":    "std",
@@ -621,7 +635,7 @@ func InitExampleHosts() []types.Host {
 		Hostname: "e4",
 		Address:  HostAddress[3],
 		Weight:   100,
-		MetaData: map[string]interface{}{
+		MetaData: map[string]string{
 			"stage":   "prod",
 			"version": "1.1",
 			"type":    "std",
@@ -633,7 +647,7 @@ func InitExampleHosts() []types.Host {
 		Hostname: "e5",
 		Address:  HostAddress[4],
 		Weight:   100,
-		MetaData: map[string]interface{}{
+		MetaData: map[string]string{
 			"stage":   "prod",
 			"version": "1.0",
 			"type":    "bigmem",
@@ -645,7 +659,7 @@ func InitExampleHosts() []types.Host {
 		Hostname: "e6",
 		Address:  HostAddress[5],
 		Weight:   100,
-		MetaData: map[string]interface{}{
+		MetaData: map[string]string{
 			"stage":   "prod",
 			"version": "1.1",
 			"type":    "bigmem",
@@ -657,13 +671,121 @@ func InitExampleHosts() []types.Host {
 		Hostname: "e7",
 		Address:  HostAddress[6],
 		Weight:   100,
-		MetaData: map[string]interface{}{
+		MetaData: map[string]string{
 			"stage":   "dev",
 			"version": "1.2-pre",
 			"type":    "std",
 		},
 	}
 	hosts = append(hosts, &host{hostInfo: newHostInfo(nil, e7, nil)})
+
+	return hosts
+}
+
+func TestWeightedClusterRoute(t *testing.T) {
+	routerMock1 := &v2.Router{
+		Route: v2.RouteAction{
+			ClusterName: "defaultCluster",
+			WeightedClusters: []v2.WeightedCluster{
+				{
+					Cluster: v2.ClusterWeight{
+						Name:   "w1",
+						Weight: 90,
+						MetadataMatch: map[string]string{
+							"version": "v1"},
+					},
+				},
+
+				{
+					Cluster: v2.ClusterWeight{
+						Name:   "w2",
+						Weight: 10,
+						MetadataMatch: map[string]string{
+							"version": "v2"},
+					},
+				},
+			},
+		},
+	}
+
+	routeRuleImplBase, _ := router.NewRouteRuleImplBase(nil, routerMock1)
+	clustername := routeRuleImplBase.ClusterName()
+
+	if clustername == "w1" {
+		if weightedClusterEntry, ok := routeRuleImplBase.WeightedCluster()[clustername]; ok {
+			metadataMatchCriteria := weightedClusterEntry.GetClusterMetadataMatchCriteria()
+			sslb := NewSubsetLoadBalancer(types.RoundRobin, &priorityMock,
+				newClusterStats(v2.Cluster{Name: "w1"}), NewLBSubsetInfo(SubsetMock()))
+
+			context := &ContextImplMock{
+				mmc: metadataMatchCriteria,
+			}
+
+			if host := sslb.ChooseHost(context); host.Hostname() != "e1" {
+				t.Errorf("routing with weighted cluster error, want e1, but got:", host.Hostname())
+			}
+		} else {
+			t.Errorf("routing with weighted cluster error, no clustername found")
+		}
+	} else if clustername == "w2" {
+		if weightedClusterEntry, ok := routeRuleImplBase.WeightedCluster()[clustername]; ok {
+			metadataMatchCriteria := weightedClusterEntry.GetClusterMetadataMatchCriteria()
+			sslb := NewSubsetLoadBalancer(types.RoundRobin, &priorityMock,
+				newClusterStats(v2.Cluster{Name: "w2"}), NewLBSubsetInfo(SubsetMock()))
+
+			context := &ContextImplMock{
+				mmc: metadataMatchCriteria,
+			}
+
+			if host := sslb.ChooseHost(context); host.Hostname() != "e2" {
+				t.Errorf("routing with weighted cluster error, want e1, but got:", host.Hostname())
+			}
+		} else {
+			t.Errorf("routing with weighted cluster error, no clustername found")
+		}
+	} else {
+		t.Errorf("routing with weighted cluster error, no clustername found")
+	}
+}
+
+var priorityMock = prioritySet{
+	hostSets: []types.HostSet{
+		&hostSet{
+			hosts: HostsMock(),
+		},
+	},
+}
+
+func SubsetMock() *v2.LBSubsetConfig {
+	lbsubsetconfig := &v2.LBSubsetConfig{
+		FallBackPolicy:  2, //"DEFAULT_SUBSET"
+		SubsetSelectors: [][]string{{"version"}},
+	}
+
+	return lbsubsetconfig
+}
+
+func HostsMock() []types.Host {
+	var hosts []types.Host
+
+	e1 := v2.Host{
+		Hostname: "e1",
+		Weight:   50,
+		MetaData: map[string]string{
+			"version": "v1",
+		},
+	}
+	hosts = append(hosts, &host{hostInfo: newHostInfo(nil, e1, nil)})
+
+	e2 := v2.Host{
+		Hostname: "e2",
+		Weight:   50,
+		MetaData: map[string]string{
+			"version": "v2",
+		},
+	}
+	//
+	hosts = append(hosts, &host{hostInfo: newHostInfo(nil, e2, nil)})
 
 	return hosts
 }

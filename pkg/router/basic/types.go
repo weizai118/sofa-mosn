@@ -14,9 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package basic
 
-import "github.com/alipay/sofamosn/pkg/types"
+import "github.com/alipay/sofa-mosn/pkg/types"
 
 type RouteRuleImplAdaptor struct {
 }
@@ -49,6 +50,6 @@ func (r *RouteRuleImplAdaptor) Metadata() types.RouteMetaData {
 	return nil
 }
 
-func (r *RouteRuleImplAdaptor) MetadataMatchCriteria() types.MetadataMatchCriteria {
+func (r *RouteRuleImplAdaptor) MetadataMatchCriteria(clusterName string) types.MetadataMatchCriteria {
 	return nil
 }

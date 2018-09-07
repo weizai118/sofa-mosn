@@ -14,14 +14,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package router
 
 import (
 	"sync"
 
-	"github.com/alipay/sofamosn/pkg/log"
-
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 var RoutersManager = routersManager{

@@ -14,14 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package proxy
 
 import (
 	"time"
 
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
+// Proxy
 type Proxy interface {
 	types.ReadFilter
 
@@ -30,22 +32,29 @@ type Proxy interface {
 	ReadDisableDownstream(disable bool)
 }
 
+// UpstreamCallbacks
+// callback invoked when upstream event happened
 type UpstreamCallbacks interface {
 	types.ReadFilter
 	types.ConnectionEventListener
 }
 
+// DownstreamCallbacks
+// callback invoked when downstream event happened
 type DownstreamCallbacks interface {
 	types.ConnectionEventListener
 }
 
-type ProxyTimeout struct {
+// Timeout
+type Timeout struct {
 	GlobalTimeout time.Duration
 	TryTimeout    time.Duration
 }
 
+// UpstreamFailureReason
 type UpstreamFailureReason string
 
+// Group pf some Upstream Failure Reason
 const (
 	ConnectFailed         UpstreamFailureReason = "ConnectFailed"
 	NoHealthyUpstream     UpstreamFailureReason = "NoHealthyUpstream"
@@ -53,10 +62,25 @@ const (
 	NoRoute               UpstreamFailureReason = "NoRoute"
 )
 
+// UpstreamResetType
 type UpstreamResetType string
 
+// Group of Upstream Reset Type
 const (
 	UpstreamReset         UpstreamResetType = "UpstreamReset"
 	UpstreamGlobalTimeout UpstreamResetType = "UpstreamGlobalTimeout"
 	UpstreamPerTryTimeout UpstreamResetType = "UpstreamPerTryTimeout"
 )
+
+func init() {
+	ConnNewPoolFactories = make(map[types.Protocol]connNewPool)
+}
+
+type connNewPool func(host types.Host) types.ConnectionPool
+
+var ConnNewPoolFactories map[types.Protocol]connNewPool
+
+func RegisterNewPoolFactory(protocol types.Protocol, factory connNewPool) {
+	//other
+	ConnNewPoolFactories[protocol] = factory
+}

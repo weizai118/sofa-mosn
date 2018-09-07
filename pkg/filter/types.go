@@ -14,8 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package filter
 
-import "github.com/alipay/sofamosn/pkg/types"
+import "github.com/alipay/sofa-mosn/pkg/types"
 
+// StreamFilterFactoryCreator creates a StreamFilterChainFactory according to config
 type StreamFilterFactoryCreator func(config map[string]interface{}) (types.StreamFilterChainFactory, error)
+
+// NetworkFilterFactoryCreator creates a NetworkFilterChainFactory according to config
+type NetworkFilterFactoryCreator func(config map[string]interface{}, isV2 bool) (types.NetworkFilterChainFactory, error)

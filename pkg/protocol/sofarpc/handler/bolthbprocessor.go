@@ -14,26 +14,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package handler
 
 import (
 	"context"
 
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/protocol/sofarpc"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/protocol"
+	"github.com/alipay/sofa-mosn/pkg/protocol/sofarpc"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
-type BoltHbProcessor struct {
+type boltHbProcessor struct {
 }
 
-// ctx = type.serverStreamConnection
-func (b *BoltHbProcessor) Process(context context.Context, msg interface{}, filter interface{}) {
+func (b *boltHbProcessor) Process(context context.Context, msg interface{}, filter interface{}) {
 	logger := log.ByContext(context)
 
 	if cmd, ok := msg.(*sofarpc.BoltRequestCommand); ok {
 		deserializeRequestAllFields(context, cmd)
-		reqID := sofarpc.StreamIDConvert(cmd.ReqId)
+		reqID := protocol.StreamIDConv(cmd.ReqID)
 
 		//Heartbeat message only has request header
 		if filter, ok := filter.(types.DecodeFilter); ok {
@@ -47,8 +48,8 @@ func (b *BoltHbProcessor) Process(context context.Context, msg interface{}, filt
 			}
 		}
 	} else if cmd, ok := msg.(*sofarpc.BoltResponseCommand); ok {
-		deserializeResponseAllFields(cmd, context)
-		reqID := sofarpc.StreamIDConvert(cmd.ReqId)
+		deserializeResponseAllFields(context, cmd)
+		reqID := protocol.StreamIDConv(cmd.ReqID)
 		//logger := log.ByContext(context)
 
 		//Heartbeat message only has request header

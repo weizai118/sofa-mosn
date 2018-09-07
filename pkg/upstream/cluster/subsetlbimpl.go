@@ -14,14 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package cluster
 
 import (
 	"math/rand"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 type subSetLoadBalancer struct {
@@ -49,7 +50,7 @@ func NewSubsetLoadBalancer(lbType types.LoadBalancerType, prioritySet types.Prio
 		originalPrioritySet:   prioritySet,
 		stats:                 stats,
 	}
-	
+
 	ssb.subSets = make(map[string]types.ValueSubsetMap)
 
 	// foreach every priority subset
@@ -104,11 +105,10 @@ func (sslb *subSetLoadBalancer) Update(priority uint32, hostAdded []types.Host, 
 func (sslb *subSetLoadBalancer) ChooseHost(context types.LoadBalancerContext) types.Host {
 
 	if nil != context {
-		var hostChoosen = false
-		host := sslb.TryChooseHostFromContext(context, &hostChoosen)
+		host, hostChoosen := sslb.TryChooseHostFromContext(context)
 		if hostChoosen {
-			log.DefaultLogger.Debugf("subset load balancer: match subset entry success, " +
-				"choose hostaddr = %s",host.AddressString())
+			log.DefaultLogger.Debugf("subset load balancer: match subset entry success, "+
+				"choose hostaddr = %s", host.AddressString())
 			return host
 		}
 	}
@@ -118,40 +118,36 @@ func (sslb *subSetLoadBalancer) ChooseHost(context types.LoadBalancerContext) ty
 		return nil
 	}
 	sslb.stats.LBSubSetsFallBack.Inc(1)
-	
+
 	defaulthosts := sslb.fallbackSubset.prioritySubset.GetOrCreateHostSubset(0).Hosts()
-	
+
 	if len(defaulthosts) > 0 {
-		log.DefaultLogger.Debugf("subset load balancer: use default subset,hosts are ",defaulthosts)
-	}else {
+		log.DefaultLogger.Debugf("subset load balancer: use default subset,hosts are ", defaulthosts)
+	} else {
 		log.DefaultLogger.Errorf("subset load balancer: failure, fallback subset's host is nil")
 		return nil
 	}
-	
+
 	return sslb.fallbackSubset.prioritySubset.LB().ChooseHost(context)
 }
 
-func (sslb *subSetLoadBalancer) TryChooseHostFromContext(context types.LoadBalancerContext,
-	hostChosen *bool) types.Host {
+func (sslb *subSetLoadBalancer) TryChooseHostFromContext(context types.LoadBalancerContext) (types.Host, bool) {
 
-	*hostChosen = false
 	matchCriteria := context.MetadataMatchCriteria()
 
 	if nil == matchCriteria {
 		log.DefaultLogger.Errorf("subset load balancer: context is nil")
-		return nil
+		return nil, false
 	}
 
 	entry := sslb.FindSubset(matchCriteria.MetadataMatchCriteria())
 
 	if nil == entry || !entry.Active() {
 		log.DefaultLogger.Errorf("subset load balancer: match entry failure")
-		return nil
+		return nil, false
 	}
 
-	*hostChosen = true
-
-	return entry.PrioritySubset().LB().ChooseHost(context)
+	return entry.PrioritySubset().LB().ChooseHost(context), true
 }
 
 // create or update fallback subset
@@ -202,9 +198,9 @@ func (sslb *subSetLoadBalancer) ProcessSubsets(hostAdded []types.Host, hostsRemo
 
 				kvs := sslb.ExtractSubsetMetadata(subSetKey.Keys(), host)
 				if len(kvs) > 0 {
-					
+
 					entry := sslb.FindOrCreateSubset(sslb.subSets, kvs, 0)
-					
+
 					if entry.Initialized() {
 						updateCB(entry)
 					} else {
@@ -409,7 +405,7 @@ func (hsi *hostSubsetImpl) UpdateHostSubset(hostsAdded []types.Host, hostsRemove
 			healthyHosts = append(healthyHosts, host)
 		}
 	}
-	
+
 	//最终更新host
 	hsi.hostSubset.UpdateHosts(finalhosts, healthyHosts, nil, nil,
 		filteredAdded, filteredRemoved)
@@ -457,13 +453,13 @@ type PrioritySubsetImpl struct {
 	originalPrioritySet types.PrioritySet
 	empty               bool
 	loadbalancer        types.LoadBalancer
-	predicate_          types.HostPredicate // match function for host and metadata
+	predicateFunc       types.HostPredicate // match function for host and metadata
 }
 
 func NewPrioritySubsetImpl(subsetLB *subSetLoadBalancer, predicate types.HostPredicate) types.PrioritySubset {
 	psi := &PrioritySubsetImpl{
 		originalPrioritySet: subsetLB.originalPrioritySet,
-		predicate_:          predicate,
+		predicateFunc:       predicate,
 		empty:               true,
 		prioritySubset:      &prioritySet{},
 	}
@@ -480,19 +476,14 @@ func NewPrioritySubsetImpl(subsetLB *subSetLoadBalancer, predicate types.HostPre
 		psi.Update(i, subsetLB.originalPrioritySet.HostSetsByPriority()[i].Hosts(), []types.Host{})
 	}
 
-	switch subsetLB.lbType {
-	case types.Random:
-		psi.loadbalancer = newRandomLoadbalancer(psi.prioritySubset)
-	case types.RoundRobin:
-		psi.loadbalancer = newRoundRobinLoadBalancer(psi.prioritySubset)
-	}
+	psi.loadbalancer = NewLoadBalancer(subsetLB.lbType, psi.prioritySubset)
 
 	return psi
 }
 
 func (psi *PrioritySubsetImpl) Update(priority uint32, hostsAdded []types.Host, hostsRemoved []types.Host) {
 
-	psi.GetOrCreateHostSubset(priority).UpdateHostSubset(hostsAdded, hostsRemoved, psi.predicate_)
+	psi.GetOrCreateHostSubset(priority).UpdateHostSubset(hostsAdded, hostsRemoved, psi.predicateFunc)
 
 	for _, hostSet := range psi.prioritySubset.HostSetsByPriority() {
 		if len(hostSet.Hosts()) > 0 {
@@ -530,7 +521,7 @@ func NewLBSubsetInfo(subsetCfg *v2.LBSubsetConfig) types.LBSubsetInfo {
 		fallbackPolicy: types.FallBackPolicy(subsetCfg.FallBackPolicy),
 		subSetKeys:     GenerateSubsetKeys(subsetCfg.SubsetSelectors),
 	}
-	
+
 	if len(subsetCfg.SubsetSelectors) == 0 {
 		lbSubsetInfo.enabled = false
 	} else {

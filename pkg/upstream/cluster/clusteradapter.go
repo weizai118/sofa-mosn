@@ -14,74 +14,74 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package cluster
 
 import (
-	"errors"
+	"fmt"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/protocol/sofarpc"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
 )
 
-var ClusterAdap ClusterAdapter
+var clusterMngAdapterInstance *MngAdapter
 
-type ClusterAdapter struct {
+func initClusterMngAdapterInstance(clusterMng *clusterManager) {
+	clusterMngAdapterInstance = &MngAdapter{
+		clusterMng: clusterMng,
+	}
+}
+
+// GetClusterMngAdapterInstance used to get clusterMngAdapterInstance
+func GetClusterMngAdapterInstance() *MngAdapter {
+	return clusterMngAdapterInstance
+}
+
+// MngAdapter is the wrapper or adapter for external caller
+type MngAdapter struct {
 	clusterMng *clusterManager
 }
 
-// Called by registry module to update cluster's host info
-func (ca *ClusterAdapter) TriggerClusterUpdate(clusterName string, hosts []v2.Host) error {
-	clusterExist := ca.clusterMng.ClusterExist(clusterName)
-
-	if !clusterExist {
-		if ca.clusterMng.autoDiscovery {
-			cluster := v2.Cluster{
-				Name:        clusterName,
-				ClusterType: v2.DYNAMIC_CLUSTER,
-				LbType:      v2.LB_RANDOM,
-			}
-
-			// for dynamically added cluster, use cluster manager's health check config
-			if ca.clusterMng.registryUseHealthCheck {
-				// todo support more default health check @boqin
-				cluster.HealthCheck = sofarpc.DefaultSofaRpcHealthCheckConf
-			}
-
-			ca.clusterMng.AddOrUpdatePrimaryCluster(cluster)
-		} else {
-			msg := "cluster doesn't support auto discovery "
-			log.DefaultLogger.Errorf(msg)
-			return errors.New(msg)
-		}
+// TriggerClusterAddOrUpdate used to Added or Update Cluster
+func (ca *MngAdapter) TriggerClusterAddOrUpdate(cluster v2.Cluster) error {
+	if ca.clusterMng == nil {
+		return fmt.Errorf("TriggerClusterAddOrUpdate Error: cluster manager is nil")
 	}
 
-	log.DefaultLogger.Debugf("triggering cluster update, cluster name = %s hosts = %+v", clusterName, hosts)
-	ca.clusterMng.UpdateClusterHosts(clusterName, 0, hosts)
+	if !ca.clusterMng.AddOrUpdatePrimaryCluster(cluster) {
+		return fmt.Errorf("TriggerClusterAddOrUpdate failure, cluster name = %s", cluster.Name)
+	}
 
 	return nil
 }
 
-// Called when mesh receive subscribe info
-func (ca *ClusterAdapter) TriggerClusterAdded(cluster v2.Cluster) {
-	clusterExist := ca.clusterMng.ClusterExist(cluster.Name)
-
-	if !clusterExist {
-		log.DefaultLogger.Debugf("Add PrimaryCluster: %s", cluster.Name)
-
-		// for dynamically added cluster, use cluster manager's health check config
-		if ca.clusterMng.registryUseHealthCheck {
-			cluster.HealthCheck = sofarpc.DefaultSofaRpcHealthCheckConf
-		}
-
-		ca.clusterMng.AddOrUpdatePrimaryCluster(cluster)
-	} else {
-		log.DefaultLogger.Debugf("Added PrimaryCluster: %s Already Exist", cluster.Name)
+// TriggerClusterAndHostsAddOrUpdate used to Added or Update Cluster and Cluster's hosts
+func (ca *MngAdapter) TriggerClusterAndHostsAddOrUpdate(cluster v2.Cluster, hosts []v2.Host) error {
+	if err := ca.TriggerClusterAddOrUpdate(cluster); err != nil {
+		return err
 	}
+
+	return ca.clusterMng.UpdateClusterHosts(cluster.Name, 0, hosts)
 }
 
-// Called when mesh receive unsubscribe info
-func (ca *ClusterAdapter) TriggerClusterDel(clusterName string) {
-	log.DefaultLogger.Debugf("Delete Cluster %s", clusterName)
-	ca.clusterMng.RemovePrimaryCluster(clusterName)
+// TriggerClusterDel :used to delete c uster by clusterName
+func (ca *MngAdapter) TriggerClusterDel(clusterName string) error {
+	if ca.clusterMng == nil {
+		return fmt.Errorf("TriggerClusterAddOrUpdate Error: cluster manager is nil")
+	}
+
+	return ca.clusterMng.RemovePrimaryCluster(clusterName)
+}
+
+// TriggerClusterHostUpdate used to Added or Update Cluster's hosts, return err if cluster not exist
+func (ca *MngAdapter) TriggerClusterHostUpdate(clusterName string, hosts []v2.Host) error {
+	if ca.clusterMng == nil {
+		return fmt.Errorf("TriggerClusterAddOrUpdate Error: cluster manager is nil")
+	}
+
+	return ca.clusterMng.UpdateClusterHosts(clusterName, 0, hosts)
+}
+
+// TriggerHostDel used to delete
+func (ca *MngAdapter) TriggerHostDel(clusterName string, hostAddress string) error {
+	return ca.clusterMng.RemoveClusterHost(clusterName, hostAddress)
 }

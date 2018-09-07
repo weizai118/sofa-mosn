@@ -14,11 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package proxy
 
 import (
-	"github.com/alipay/sofamosn/pkg/network/buffer"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/buffer"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 func (s *downStream) addEncodedData(filter *activeStreamSenderFilter, data types.IoBuffer, streaming bool) {
@@ -62,11 +63,11 @@ func (s *downStream) runAppendHeaderFilters(filter *activeStreamSenderFilter, he
 			f.stopped = true
 
 			return true
-		} else {
-			f.headersContinued = true
-
-			return false
 		}
+
+		f.headersContinued = true
+
+		return false
 	}
 
 	return false
@@ -163,11 +164,11 @@ func (s *downStream) runReceiveHeadersFilters(filter *activeStreamReceiverFilter
 			f.stopped = true
 
 			return true
-		} else {
-			f.headersContinued = true
-
-			return false
 		}
+
+		f.headersContinued = true
+
+		return false
 	}
 
 	return false
@@ -253,8 +254,10 @@ func (s *downStream) runReceiveTrailersFilters(filter *activeStreamReceiverFilte
 	return false
 }
 
+// FilterStage is the type of the filter stage
 type FilterStage int
 
+// Const of all stages
 const (
 	DecodeHeaders = iota
 	DecodeData
@@ -264,7 +267,6 @@ const (
 	EncodeTrailers
 )
 
-// types.StreamFilterCallbacks
 type activeStreamFilter struct {
 	index int
 
@@ -286,8 +288,8 @@ func (f *activeStreamFilter) Route() types.Route {
 	return f.activeStream.route
 }
 
-func (f *activeStreamFilter) StreamId() string {
-	return f.activeStream.streamId
+func (f *activeStreamFilter) StreamID() string {
+	return f.activeStream.streamID
 }
 
 func (f *activeStreamFilter) RequestInfo() types.RequestInfo {

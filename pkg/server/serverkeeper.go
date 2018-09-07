@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package server
 
 import (
@@ -25,7 +26,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alipay/sofamosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/log"
 )
 
 func init() {
@@ -35,17 +36,11 @@ func init() {
 }
 
 var (
-	pidFile string
-
-	onProcessExit []func()
-
-	gracefulTimeout time.Duration = time.Second * 30 //default 30s
-
-	BaseFolder string
-
+	pidFile               string
+	onProcessExit         []func()
+	GracefulTimeout       = time.Second * 30 //default 30s
 	shutdownCallbacksOnce sync.Once
-
-	shutdownCallbacks []func() error
+	shutdownCallbacks     []func() error
 )
 
 func writePidFile() error {
@@ -175,11 +170,14 @@ func reconfigure() {
 
 	log.DefaultLogger.Infof("SIGHUP received: fork-exec to %d", fork)
 
+	// Wait for new mosn start
+	time.Sleep(3 * time.Second)
+
 	// Stop accepting requests
 	StopAccept()
 
-	// Wait for all conections to be finished
-	WaitConnectionsDone(gracefulTimeout)
+	// Wait for all connections to be finished
+	WaitConnectionsDone(GracefulTimeout)
 	log.DefaultLogger.Infof("process %d gracefully shutdown", os.Getpid())
 
 	// Stop the old server, all the connections have been closed and the new one is running

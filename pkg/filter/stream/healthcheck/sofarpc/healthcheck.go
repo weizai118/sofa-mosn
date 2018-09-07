@@ -14,21 +14,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package sofarpc
 
 import (
 	"context"
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/config"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/protocol/sofarpc"
-	"github.com/alipay/sofamosn/pkg/protocol/sofarpc/codec"
-	"github.com/alipay/sofamosn/pkg/types"
-	"reflect"
 	"time"
+
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/config"
+	"github.com/alipay/sofa-mosn/pkg/filter"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/protocol/sofarpc"
+	"github.com/alipay/sofa-mosn/pkg/protocol/sofarpc/codec"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 // todo: support cached pass through
+
+func init() {
+	filter.RegisterStream("healthcheck", CreateHealthCheckFilterFactory)
+}
 
 // types.StreamSenderFilter
 type healthCheckFilter struct {
@@ -41,13 +47,14 @@ type healthCheckFilter struct {
 	// request properties
 	intercept      bool
 	protocol       byte
-	requestId      uint32
+	requestID      uint32
 	healthCheckReq bool
 	// callbacks
 	cb types.StreamReceiverFilterCallbacks
 }
 
-func NewHealthCheckFilter(context context.Context, config *v2.HealthCheckFilter) *healthCheckFilter {
+// NewHealthCheckFilter used to create new health check filter
+func NewHealthCheckFilter(context context.Context, config *v2.HealthCheckFilter) types.StreamReceiverFilter {
 	return &healthCheckFilter{
 		context:                      context,
 		passThrough:                  config.PassThrough,
@@ -58,14 +65,14 @@ func NewHealthCheckFilter(context context.Context, config *v2.HealthCheckFilter)
 
 func (f *healthCheckFilter) OnDecodeHeaders(headers map[string]string, endStream bool) types.FilterHeadersStatus {
 	if cmdCodeStr, ok := headers[sofarpc.SofaPropertyHeader(sofarpc.HeaderCmdCode)]; ok {
-		cmdCode := sofarpc.ConvertPropertyValue(cmdCodeStr, reflect.Int16)
+		cmdCode := sofarpc.ConvertPropertyValueInt16(cmdCodeStr)
 
 		//sofarpc.HEARTBEAT(0) is equal to sofarpc.TR_HEARTBEAT(0)
 		if cmdCode == sofarpc.HEARTBEAT {
 			protocolStr := headers[sofarpc.SofaPropertyHeader(sofarpc.HeaderProtocolCode)]
-			f.protocol = sofarpc.ConvertPropertyValue(protocolStr, reflect.Uint8).(byte)
-			requestIdStr := headers[sofarpc.SofaPropertyHeader(sofarpc.HeaderReqID)]
-			f.requestId = sofarpc.ConvertPropertyValue(requestIdStr, reflect.Uint32).(uint32)
+			f.protocol = sofarpc.ConvertPropertyValueUint8(protocolStr)
+			requestIDStr := headers[sofarpc.SofaPropertyHeader(sofarpc.HeaderReqID)]
+			f.requestID = sofarpc.ConvertPropertyValueUint32(requestIDStr)
 			f.healthCheckReq = true
 			f.cb.RequestInfo().SetHealthCheck(true)
 
@@ -83,9 +90,9 @@ func (f *healthCheckFilter) OnDecodeHeaders(headers map[string]string, endStream
 
 	if f.intercept {
 		return types.FilterHeadersStatusStopIteration
-	} else {
-		return types.FilterHeadersStatusContinue
 	}
+
+	return types.FilterHeadersStatusContinue
 }
 
 func (f *healthCheckFilter) OnDecodeData(buf types.IoBuffer, endStream bool) types.FilterDataStatus {
@@ -95,9 +102,9 @@ func (f *healthCheckFilter) OnDecodeData(buf types.IoBuffer, endStream bool) typ
 
 	if f.intercept {
 		return types.FilterDataStatusStopIterationNoBuffer
-	} else {
-		return types.FilterDataStatusContinue
 	}
+
+	return types.FilterDataStatusContinue
 }
 
 func (f *healthCheckFilter) OnDecodeTrailers(trailers map[string]string) types.FilterTrailersStatus {
@@ -107,9 +114,9 @@ func (f *healthCheckFilter) OnDecodeTrailers(trailers map[string]string) types.F
 
 	if f.intercept {
 		return types.FilterTrailersStatusStopIteration
-	} else {
-		return types.FilterTrailersStatusContinue
 	}
+
+	return types.FilterTrailersStatusContinue
 }
 
 func (f *healthCheckFilter) handleIntercept() {
@@ -117,13 +124,13 @@ func (f *healthCheckFilter) handleIntercept() {
 
 	var resp interface{}
 
-	//TODO add protocl-level interface for heartbeat process, like Protocols.TriggerHeartbeat(protocolCode, requestId)&Protocols.ReplyHeartbeat(protocolCode, requestId)
+	//TODO add protocol-level interface for heartbeat process, like Protocols.TriggerHeartbeat(protocolCode, requestID)&Protocols.ReplyHeartbeat(protocolCode, requestID)
 	switch f.protocol {
 	//case f.protocol == sofarpc.PROTOCOL_CODE:
-	//resp = codec.NewTrHeartbeatAck( f.requestId)
+	//resp = codec.NewTrHeartbeatAck( f.requestID)
 	case sofarpc.PROTOCOL_CODE_V1, sofarpc.PROTOCOL_CODE_V2:
 		//boltv1 and boltv2 use same heartbeat struct as BoltV1
-		resp = codec.NewBoltHeartbeatAck(f.requestId)
+		resp = codec.NewBoltHeartbeatAck(f.requestID)
 	default:
 		log.ByContext(f.context).Errorf("Unknown protocol code: [%x] while intercept healthcheck.", f.protocol)
 		//TODO: set hijack reply - codec error, actually this would happen at codec stage which is before this
@@ -138,16 +145,17 @@ func (f *healthCheckFilter) SetDecoderFilterCallbacks(cb types.StreamReceiverFil
 
 func (f *healthCheckFilter) OnDestroy() {}
 
-// ~~ factory
+// HealthCheckFilterConfigFactory Filter Config Factory
 type HealthCheckFilterConfigFactory struct {
 	FilterConfig *v2.HealthCheckFilter
 }
 
-func (f *HealthCheckFilterConfigFactory) CreateFilterChain(context context.Context, callbacks types.FilterChainFactoryCallbacks) {
+func (f *HealthCheckFilterConfigFactory) CreateFilterChain(context context.Context, callbacks types.StreamFilterChainFactoryCallbacks) {
 	filter := NewHealthCheckFilter(context, f.FilterConfig)
 	callbacks.AddStreamReceiverFilter(filter)
 }
 
+// CreateHealthCheckFilterFactory
 func CreateHealthCheckFilterFactory(conf map[string]interface{}) (types.StreamFilterChainFactory, error) {
 	return &HealthCheckFilterConfigFactory{
 		FilterConfig: config.ParseHealthcheckFilter(conf),

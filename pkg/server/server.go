@@ -14,19 +14,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package server
 
 import (
 	"errors"
 	"os"
 	"runtime"
-	_ "sync"
 	"time"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/types"
-	"github.com/orcaman/concurrent-map"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/network"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 func init() {
@@ -38,7 +38,7 @@ func init() {
 }
 
 // currently, only one server supported
-func GetServer() *server {
+func GetServer() Server {
 	if len(servers) == 0 {
 		log.DefaultLogger.Errorf("Server is nil and hasn't been initiated at this time")
 		return nil
@@ -50,25 +50,29 @@ func GetServer() *server {
 var servers []*server
 
 type server struct {
-	logger        log.Logger
-	stopChan      chan struct{}
-	handler       types.ConnectionHandler
-	ListenerInMap cmap.ConcurrentMap
+	serverName string
+	logger     log.Logger
+	stopChan   chan struct{}
+	handler    types.ConnectionHandler
 }
 
 func NewServer(config *Config, cmFilter types.ClusterManagerFilter, clMng types.ClusterManager) Server {
-
 	procNum := runtime.NumCPU()
 
 	if config != nil {
 		//graceful timeout setting
 		if config.GracefulTimeout != 0 {
-			gracefulTimeout = config.GracefulTimeout
+			GracefulTimeout = config.GracefulTimeout
 		}
 
 		//processor num setting
 		if config.Processor > 0 {
 			procNum = config.Processor
+		}
+
+		network.UseNetpollMode = config.UseNetpollMode
+		if config.UseNetpollMode {
+			log.StartLogger.Infof("Netpoll mode enabled.")
 		}
 	}
 
@@ -77,45 +81,23 @@ func NewServer(config *Config, cmFilter types.ClusterManagerFilter, clMng types.
 	OnProcessShutDown(log.CloseAll)
 
 	server := &server{
-		logger:        log.DefaultLogger,
-		stopChan:      make(chan struct{}),
-		handler:       NewHandler(cmFilter, clMng, log.DefaultLogger),
-		ListenerInMap: cmap.New(),
+		serverName: config.ServerName,
+		logger:     log.DefaultLogger,
+		stopChan:   make(chan struct{}),
+		handler:    NewHandler(cmFilter, clMng, log.DefaultLogger),
 	}
+
+	initListenerAdapterInstance(server.serverName, server.handler)
 
 	servers = append(servers, server)
 
 	return server
 }
 
-func (srv *server) AddListener(lc *v2.ListenerConfig, networkFiltersFactory types.NetworkFilterChainFactory, streamFiltersFactories []types.StreamFilterChainFactory) {
-	if srv.ListenerInMap.Has(lc.Name) {
-		log.DefaultLogger.Warnf("Listen Already Started, Listen = %+v", lc)
-	} else {
-		srv.ListenerInMap.Set(lc.Name, lc)
-		srv.handler.AddListener(lc, networkFiltersFactory, streamFiltersFactories)
-	}
-}
+func (srv *server) AddListener(lc *v2.ListenerConfig, networkFiltersFactories []types.NetworkFilterChainFactory,
+	streamFiltersFactories []types.StreamFilterChainFactory) (types.ListenerEventListener, error) {
 
-func (srv *server) AddListenerAndStart(lc *v2.ListenerConfig, networkFiltersFactory types.NetworkFilterChainFactory,
-	streamFiltersFactories []types.StreamFilterChainFactory) error {
-
-	if srv.ListenerInMap.Has(lc.Name) {
-		log.DefaultLogger.Warnf("Listener Already Started, Listener Name = %+v", lc.Name)
-	} else {
-		srv.ListenerInMap.Set(lc.Name, lc)
-		al := srv.handler.AddListener(lc, networkFiltersFactory, streamFiltersFactories)
-
-		if activeListener, ok := al.(*activeListener); ok {
-			go activeListener.listener.Start(nil)
-		}
-	}
-
-	return nil
-}
-
-func (srv *server) AddOrUpdateListener(lc v2.ListenerConfig) {
-	// TODO: support add listener or update existing listener
+	return srv.handler.AddOrUpdateListener(lc, networkFiltersFactories, streamFiltersFactories)
 }
 
 func (srv *server) Start() {
@@ -131,7 +113,7 @@ func (srv *server) Start() {
 	}
 }
 
-func (src *server) Restart() {
+func (srv *server) Restart() {
 	// TODO
 }
 
@@ -140,6 +122,10 @@ func (srv *server) Close() {
 	srv.handler.StopListeners(nil, true)
 
 	close(srv.stopChan)
+}
+
+func (srv *server) Handler() types.ConnectionHandler {
+	return srv.handler
 }
 
 func Stop() {
@@ -154,6 +140,12 @@ func StopAccept() {
 	}
 }
 
+func StopConnection() {
+	for _, server := range servers {
+		server.handler.StopConnection()
+	}
+}
+
 func ListListenerFD() []uintptr {
 	var fds []uintptr
 	for _, server := range servers {
@@ -163,11 +155,16 @@ func ListListenerFD() []uintptr {
 }
 
 func WaitConnectionsDone(duration time.Duration) error {
-	timeout := time.NewTimer(duration)
+	// one duration wait for connection to active close
+	// two duration wait for connection to transfer
+	// 5 seconds wait for read timeout
+	timeout := time.NewTimer(duration*2 + time.Second*5)
 	wait := make(chan struct{})
+	time.Sleep(duration)
 	go func() {
 		//todo close idle connections and wait active connections complete
-		time.Sleep(duration * 2)
+		StopConnection()
+		time.Sleep(duration + time.Second*5)
 		wait <- struct{}{}
 	}()
 
@@ -182,7 +179,7 @@ func WaitConnectionsDone(duration time.Duration) error {
 func InitDefaultLogger(config *Config) {
 
 	var logPath string
-	var logLevel log.LogLevel
+	var logLevel log.Level
 
 	if config != nil {
 		logPath = config.LogPath

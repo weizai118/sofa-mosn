@@ -14,23 +14,28 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package server
 
 import (
 	"container/list"
 	"context"
+	"crypto/rand"
+	"fmt"
 	"net"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/filter/accept/original_dst"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/network"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/filter/accept/originaldst"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/network"
+	"github.com/alipay/sofa-mosn/pkg/tls"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 // ConnectionHandler
@@ -43,7 +48,11 @@ type connHandler struct {
 	logger         log.Logger
 }
 
-func NewHandler(clusterManagerFilter types.ClusterManagerFilter, clMng types.ClusterManager, logger log.Logger) types.ConnectionHandler {
+// NewHandler
+// create types.ConnectionHandler's implement connHandler
+// with cluster manager and logger
+func NewHandler(clusterManagerFilter types.ClusterManagerFilter, clMng types.ClusterManager,
+	logger log.Logger) types.ConnectionHandler {
 	ch := &connHandler{
 		numConnections: 0,
 		clusterManager: clMng,
@@ -60,7 +69,9 @@ func NewHandler(clusterManagerFilter types.ClusterManagerFilter, clMng types.Clu
 func (ch *connHandler) UpdateClusterConfig(clusters []v2.Cluster) error {
 
 	for _, cluster := range clusters {
-		ch.clusterManager.AddOrUpdatePrimaryCluster(cluster)
+		if !ch.clusterManager.AddOrUpdatePrimaryCluster(cluster) {
+			return fmt.Errorf("UpdateClusterConfig: AddOrUpdatePrimaryCluster failure, cluster name = %s", cluster.Name)
+		}
 	}
 
 	// TODO: remove cluster
@@ -78,52 +89,127 @@ func (ch *connHandler) NumConnections() uint64 {
 	return uint64(atomic.LoadInt64(&ch.numConnections))
 }
 
-func (ch *connHandler) AddListener(lc *v2.ListenerConfig, networkFiltersFactory types.NetworkFilterChainFactory,
-	streamFiltersFactories []types.StreamFilterChainFactory) types.ListenerEventListener {
-	//TODO: connection level stop-chan usage confirm
-	listenerStopChan := make(chan struct{})
-
-	//use default listener path
-	if lc.LogPath == "" {
-		lc.LogPath = MosnLogBasePath + string(os.PathSeparator) + lc.Name + ".log"
-	}
-
-	logger, err := log.NewLogger(lc.LogPath, log.LogLevel(lc.LogLevel))
+// GenerateListenerID generates an uuid
+// https://tools.ietf.org/html/rfc4122
+// crypto.rand use getrandom(2) or /dev/urandom
+// It is maybe occur an error due to system error
+// panic if an error occurred
+func (ch *connHandler) GenerateListenerID() string {
+	uuid := make([]byte, 16)
+	_, err := rand.Read(uuid)
 	if err != nil {
-		ch.logger.Fatalf("initialize listener logger failed : %v", err)
+		ch.logger.Fatalf("generate an uuid failed, error: %v", err)
 	}
-
-	//initialize access log
-	var als []types.AccessLog
-
-	for _, alConfig := range lc.AccessLogs {
-
-		//use default listener access log path
-		if alConfig.Path == "" {
-			alConfig.Path = MosnLogBasePath + string(os.PathSeparator) + lc.Name + "_access.log"
-		}
-
-		if al, err := log.NewAccessLog(alConfig.Path, nil, alConfig.Format); err == nil {
-			als = append(als, al)
-		} else {
-			log.StartLogger.Fatalln("initialize listener access logger %s failed : %v", alConfig.Path, err)
-		}
-	}
-
-	l := network.NewListener(lc, logger)
-
-	al := newActiveListener(l, logger, als, networkFiltersFactory, streamFiltersFactories, ch, listenerStopChan, lc.DisableConnIo)
-	l.SetListenerCallbacks(al)
-
-	ch.listeners = append(ch.listeners, al)
-
-	return al
+	// see section 4.1.1
+	uuid[8] = uuid[8]&^0xc0 | 0x80
+	// see section 4.1.3
+	uuid[6] = uuid[6]&^0xf0 | 0x40
+	return fmt.Sprintf("%x-%x-%x-%x-%x", uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:])
 }
 
-func (ch *connHandler) StartListener(listenerTag uint64, lctx context.Context) {
+// AddOrUpdateListener used to add or update listener
+// listener name is unique key to represent the listener
+// and listener with the same name must have the same configured address
+func (ch *connHandler) AddOrUpdateListener(lc *v2.ListenerConfig, networkFiltersFactories []types.NetworkFilterChainFactory,
+	streamFiltersFactories []types.StreamFilterChainFactory) (types.ListenerEventListener, error) {
+
+	var listenerName string
+	if lc.Name == "" {
+		listenerName = ch.GenerateListenerID()
+		lc.Name = listenerName
+	} else {
+		listenerName = lc.Name
+	}
+
+	var al *activeListener
+	if al = ch.findActiveListenerByName(listenerName); al != nil {
+		// listener already exist, update the listener
+
+		// a listener with the same name must have the same configured address
+		if al.listener.Addr().String() != lc.Addr.String() ||
+			al.listener.Addr().Network() != lc.Addr.Network() {
+			return nil, fmt.Errorf("error updating listener, listen address and listen name doesn't match")
+		}
+
+		equalConfig := reflect.DeepEqual(al.listener.Config(), lc)
+		equalNetworkFilter := reflect.DeepEqual(al.networkFiltersFactories, networkFiltersFactories)
+		equalStreamFilters := reflect.DeepEqual(al.streamFiltersFactories, streamFiltersFactories)
+		// duplicate config does nothing
+		if equalConfig && equalNetworkFilter && equalStreamFilters {
+			log.DefaultLogger.Debugf("duplicate listener:%s found. no add/update", listenerName)
+			return nil, nil
+		}
+
+		// update some config, and as Address and Name doesn't change , so need't change *rawl
+		al.updatedLabel = true
+		if !equalConfig {
+			al.disableConnIo = lc.DisableConnIo
+			al.listener.SetConfig(lc)
+			al.listener.SetePerConnBufferLimitBytes(lc.PerConnBufferLimitBytes)
+			al.listener.SetListenerTag(lc.ListenerTag)
+			al.listener.SethandOffRestoredDestinationConnections(lc.HandOffRestoredDestinationConnections)
+			log.DefaultLogger.Debugf("AddOrUpdateListener: use new listen config = %+v", lc)
+		}
+
+		// update network filter
+		if !equalNetworkFilter {
+			al.networkFiltersFactories = networkFiltersFactories
+			log.DefaultLogger.Debugf("AddOrUpdateListener: use new networkFiltersFactories = %+v", networkFiltersFactories)
+		}
+
+		// update stream filter
+		if !equalStreamFilters {
+			al.streamFiltersFactories = streamFiltersFactories
+			log.DefaultLogger.Debugf("AddOrUpdateListener: use new streamFiltersFactories = %+v", streamFiltersFactories)
+		}
+	} else {
+		// listener doesn't exist, add the listener
+		//TODO: connection level stop-chan usage confirm
+		listenerStopChan := make(chan struct{})
+		//use default listener path
+		if lc.LogPath == "" {
+			lc.LogPath = MosnLogBasePath + string(os.PathSeparator) + lc.Name + ".log"
+		}
+
+		logger, err := log.NewLogger(lc.LogPath, log.Level(lc.LogLevel))
+		if err != nil {
+			return nil, fmt.Errorf("initialize listener logger failed : %v", err.Error())
+		}
+
+		//initialize access log
+		var als []types.AccessLog
+
+		for _, alConfig := range lc.AccessLogs {
+
+			//use default listener access log path
+			if alConfig.Path == "" {
+				alConfig.Path = MosnLogBasePath + string(os.PathSeparator) + lc.Name + "_access.log"
+			}
+
+			if al, err := log.NewAccessLog(alConfig.Path, nil, alConfig.Format); err == nil {
+				als = append(als, al)
+			} else {
+				return nil, fmt.Errorf("initialize listener access logger ", alConfig.Path, " failed: ", err.Error())
+			}
+		}
+
+		l := network.NewListener(lc, logger)
+
+		al, err = newActiveListener(l, lc, logger, als, networkFiltersFactories, streamFiltersFactories, ch, listenerStopChan)
+		if err != nil {
+			return al, err
+		}
+		l.SetListenerCallbacks(al)
+		ch.listeners = append(ch.listeners, al)
+	}
+
+	return al, nil
+}
+
+func (ch *connHandler) StartListener(lctx context.Context, listenerTag uint64) {
 	for _, l := range ch.listeners {
 		if l.listener.ListenerTag() == listenerTag {
-			// TODO: use goruntine pool
+			// TODO: use goroutine pool
 			go l.listener.Start(nil)
 		}
 	}
@@ -131,7 +217,7 @@ func (ch *connHandler) StartListener(listenerTag uint64, lctx context.Context) {
 
 func (ch *connHandler) StartListeners(lctx context.Context) {
 	for _, l := range ch.listeners {
-		// start goruntine
+		// start goroutine
 		go l.listener.Start(nil)
 	}
 }
@@ -141,37 +227,60 @@ func (ch *connHandler) FindListenerByAddress(addr net.Addr) types.Listener {
 
 	if l == nil {
 		return nil
-	} else {
-		return l.listener
 	}
+
+	return l.listener
 }
 
-func (ch *connHandler) RemoveListeners(listenerTag uint64) {
+func (ch *connHandler) FindListenerByName(name string) types.Listener {
+	l := ch.findActiveListenerByName(name)
+
+	if l == nil {
+		return nil
+	}
+
+	return l.listener
+}
+
+func (ch *connHandler) RemoveListeners(name string) {
 	for i, l := range ch.listeners {
-		if l.listener.ListenerTag() == listenerTag {
+		if l.listener.Name() == name {
 			ch.listeners = append(ch.listeners[:i], ch.listeners[i+1:]...)
 		}
 	}
 }
 
-func (ch *connHandler) StopListener(listenerTag uint64, lctx context.Context) {
+func (ch *connHandler) StopListener(lctx context.Context, name string, close bool) error {
 	for _, l := range ch.listeners {
-		if l.listener.ListenerTag() == listenerTag {
-			// stop goruntine
-			l.listener.Stop()
+		if l.listener.Name() == name {
+			// stop goroutine
+			if close {
+				return l.listener.Close(lctx)
+			}
+
+			return l.listener.Stop()
 		}
 	}
+
+	return nil
 }
 
-func (ch *connHandler) StopListeners(lctx context.Context, close bool) {
+func (ch *connHandler) StopListeners(lctx context.Context, close bool) error {
+	var errGlobal error
 	for _, l := range ch.listeners {
-		// stop goruntine
+		// stop goroutine
 		if close {
-			l.listener.Close(lctx)
+			if err := l.listener.Close(lctx); err != nil {
+				errGlobal = err
+			}
 		} else {
-			l.listener.Stop()
+			if err := l.listener.Stop(); err != nil {
+				errGlobal = err
+			}
 		}
 	}
+
+	return errGlobal
 }
 
 func (ch *connHandler) ListListenersFD(lctx context.Context) []uintptr {
@@ -201,37 +310,58 @@ func (ch *connHandler) findActiveListenerByAddress(addr net.Addr) *activeListene
 	return nil
 }
 
-// ListenerEventListener
-type activeListener struct {
-	disableConnIo          bool
-	listener               types.Listener
-	networkFiltersFactory  types.NetworkFilterChainFactory
-	streamFiltersFactories []types.StreamFilterChainFactory
-	listenIP               string
-	listenPort             int
-	statsNamespace         string
-	conns                  *list.List
-	connsMux               sync.RWMutex
-	handler                *connHandler
-	stopChan               chan struct{}
-	stats                  *ListenerStats
-	logger                 log.Logger
-	accessLogs             []types.AccessLog
+func (ch *connHandler) findActiveListenerByName(name string) *activeListener {
+	for _, l := range ch.listeners {
+		if l.listener != nil {
+			if l.listener.Name() == name {
+				return l
+			}
+		}
+	}
+
+	return nil
 }
 
-func newActiveListener(listener types.Listener, logger log.Logger, accessLoggers []types.AccessLog,
-	networkFiltersFactory types.NetworkFilterChainFactory, streamFiltersFactories []types.StreamFilterChainFactory,
-	handler *connHandler, stopChan chan struct{}, disableConnIo bool) *activeListener {
+func (ch *connHandler) StopConnection() {
+	for _, l := range ch.listeners {
+		close(l.stopChan)
+	}
+}
+
+// ListenerEventListener
+type activeListener struct {
+	disableConnIo           bool
+	listener                types.Listener
+	networkFiltersFactories []types.NetworkFilterChainFactory
+	streamFiltersFactories  []types.StreamFilterChainFactory
+	listenIP                string
+	listenPort              int
+	statsNamespace          string
+	conns                   *list.List
+	connsMux                sync.RWMutex
+	handler                 *connHandler
+	stopChan                chan struct{}
+	stats                   *ListenerStats
+	logger                  log.Logger
+	accessLogs              []types.AccessLog
+	updatedLabel            bool
+	tlsMng                  types.TLSContextManager
+}
+
+func newActiveListener(listener types.Listener, lc *v2.ListenerConfig, logger log.Logger, accessLoggers []types.AccessLog,
+	networkFiltersFactories []types.NetworkFilterChainFactory, streamFiltersFactories []types.StreamFilterChainFactory,
+	handler *connHandler, stopChan chan struct{}) (*activeListener, error) {
 	al := &activeListener{
-		disableConnIo:          disableConnIo,
-		listener:               listener,
-		networkFiltersFactory:  networkFiltersFactory,
-		streamFiltersFactories: streamFiltersFactories,
-		conns:      list.New(),
-		handler:    handler,
-		stopChan:   stopChan,
-		logger:     logger,
-		accessLogs: accessLoggers,
+		disableConnIo:           lc.DisableConnIo,
+		listener:                listener,
+		networkFiltersFactories: networkFiltersFactories,
+		streamFiltersFactories:  streamFiltersFactories,
+		conns:        list.New(),
+		handler:      handler,
+		stopChan:     stopChan,
+		logger:       logger,
+		accessLogs:   accessLoggers,
+		updatedLabel: false,
 	}
 
 	listenPort := 0
@@ -248,16 +378,38 @@ func newActiveListener(listener types.Listener, logger log.Logger, accessLoggers
 	al.statsNamespace = types.ListenerStatsPrefix + strconv.Itoa(listenPort)
 	al.stats = newListenerStats(al.statsNamespace)
 
-	return al
+	mgr, err := tls.NewTLSServerContextManager(lc, listener, logger)
+	if err != nil {
+		logger.Errorf("create tls context manager failed, %v", err)
+		return nil, err
+	}
+	al.tlsMng = mgr
+
+	return al, nil
 }
 
 // ListenerEventListener
-func (al *activeListener) OnAccept(rawc net.Conn, handOffRestoredDestinationConnections bool, oriRemoteAddr net.Addr) {
+func (al *activeListener) OnAccept(rawc net.Conn, handOffRestoredDestinationConnections bool, oriRemoteAddr net.Addr, ch chan types.Connection, buf []byte) {
+	var rawf *os.File
+
+	// only store fd and tls conn handshake in final working listener
+	if !handOffRestoredDestinationConnections {
+		if !al.disableConnIo && network.UseNetpollMode {
+			// store fd for further usage
+			if tc, ok := rawc.(*net.TCPConn); ok {
+				rawf, _ = tc.File()
+			}
+		}
+		if al.tlsMng != nil && al.tlsMng.Enabled() {
+			rawc = al.tlsMng.Conn(rawc)
+		}
+	}
+
 	arc := newActiveRawConn(rawc, al)
 	// TODO: create listener filter chain
 
 	if handOffRestoredDestinationConnections {
-		arc.acceptedFilters = append(arc.acceptedFilters, original_dst.NewOriginalDst())
+		arc.acceptedFilters = append(arc.acceptedFilters, originaldst.NewOriginalDst())
 		arc.handOffRestoredDestinationConnections = true
 		log.DefaultLogger.Infof("accept restored destination connection from:%s", al.listener.Addr().String())
 	} else {
@@ -267,33 +419,37 @@ func (al *activeListener) OnAccept(rawc net.Conn, handOffRestoredDestinationConn
 	ctx := context.WithValue(context.Background(), types.ContextKeyListenerPort, al.listenPort)
 	ctx = context.WithValue(ctx, types.ContextKeyListenerName, al.listener.Name())
 	ctx = context.WithValue(ctx, types.ContextKeyListenerStatsNameSpace, al.statsNamespace)
-	ctx = context.WithValue(ctx, types.ContextKeyNetworkFilterChainFactory, al.networkFiltersFactory)
+	ctx = context.WithValue(ctx, types.ContextKeyNetworkFilterChainFactories, al.networkFiltersFactories)
 	ctx = context.WithValue(ctx, types.ContextKeyStreamFilterChainFactories, al.streamFiltersFactories)
 	ctx = context.WithValue(ctx, types.ContextKeyLogger, al.logger)
 	ctx = context.WithValue(ctx, types.ContextKeyAccessLogs, al.accessLogs)
+	if rawf != nil {
+		ctx = context.WithValue(ctx, types.ContextKeyConnectionFd, rawf)
+	}
+	if ch != nil {
+		ctx = context.WithValue(ctx, types.ContextKeyAcceptChan, ch)
+		ctx = context.WithValue(ctx, types.ContextKeyAcceptBuffer, buf)
+	}
 	if oriRemoteAddr != nil {
 		ctx = context.WithValue(ctx, types.ContextOriRemoteAddr, oriRemoteAddr)
 	}
-	arc.ContinueFilterChain(true, ctx)
+
+	arc.ContinueFilterChain(ctx, true)
 }
 
-func (al *activeListener) OnNewConnection(conn types.Connection, ctx context.Context) {
+func (al *activeListener) OnNewConnection(ctx context.Context, conn types.Connection) {
 	//Register Proxy's Filter
-	configFactory := al.networkFiltersFactory.CreateFilterFactory(al.handler.clusterManager, ctx)
-	buildFilterChain(conn.FilterManager(), configFactory)
-
-	// todo: this hack is due to http2 protocol process. golang http2 provides a io loop to read/write stream
-	if !al.disableConnIo {
-		// start conn loops first
-		conn.Start(ctx)
-	}
-
 	filterManager := conn.FilterManager()
+	for _, nfcf := range al.networkFiltersFactories {
+		nfcf.CreateFilterChain(ctx, al.handler.clusterManager, filterManager)
+	}
+	filterManager.InitializeReadFilters()
 
 	if len(filterManager.ListReadFilter()) == 0 &&
 		len(filterManager.ListWriteFilters()) == 0 {
 		// no filter found, close connection
 		conn.Close(types.NoFlush, types.LocalClose)
+		return
 	} else {
 		ac := newActiveConnection(al, conn)
 
@@ -306,7 +462,13 @@ func (al *activeListener) OnNewConnection(conn types.Connection, ctx context.Con
 		al.stats.DownstreamConnectionTotal().Inc(1)
 		atomic.AddInt64(&al.handler.numConnections, 1)
 
-		al.logger.Debugf("new downstream connection %d accepted", conn.Id())
+		al.logger.Debugf("new downstream connection %d accepted", conn.ID())
+	}
+
+	// todo: this hack is due to http2 protocol process. golang http2 provides a io loop to read/write stream
+	if !al.disableConnIo {
+		// start conn loops first
+		conn.Start(ctx)
 	}
 }
 
@@ -324,21 +486,22 @@ func (al *activeListener) removeConnection(ac *activeConnection) {
 	al.logger.Debugf("close downstream connection, stats: %s", al.stats.String())
 }
 
-func (al *activeListener) newConnection(rawc net.Conn, ctx context.Context) {
-	conn := network.NewServerConnection(rawc, al.stopChan, al.logger)
+func (al *activeListener) newConnection(ctx context.Context, rawc net.Conn) {
+	conn := network.NewServerConnection(ctx, rawc, al.stopChan, al.logger)
 	oriRemoteAddr := ctx.Value(types.ContextOriRemoteAddr)
 	if oriRemoteAddr != nil {
 		conn.SetRemoteAddr(oriRemoteAddr.(net.Addr))
 	}
-	newCtx := context.WithValue(ctx, types.ContextKeyConnectionId, conn.Id())
+	newCtx := context.WithValue(ctx, types.ContextKeyConnectionID, conn.ID())
 
 	conn.SetBufferLimit(al.listener.PerConnBufferLimitBytes())
 
-	al.OnNewConnection(conn, newCtx)
+	al.OnNewConnection(newCtx, conn)
 }
 
 type activeRawConn struct {
 	rawc                                  net.Conn
+	rawf                                  *os.File
 	originalDstIP                         string
 	originalDstPort                       int
 	oriRemoteAddr                         net.Addr
@@ -346,7 +509,7 @@ type activeRawConn struct {
 	rawcElement                           *list.Element
 	activeListener                        *activeListener
 	acceptedFilters                       []types.ListenerFilter
-	accptedFilterIndex                    int
+	acceptedFilterIndex                   int
 }
 
 func newActiveRawConn(rawc net.Conn, activeListener *activeListener) *activeRawConn {
@@ -356,51 +519,57 @@ func newActiveRawConn(rawc net.Conn, activeListener *activeListener) *activeRawC
 	}
 }
 
-func (arc *activeRawConn) SetOrigingalAddr(ip string, port int) {
+func (arc *activeRawConn) SetOriginalAddr(ip string, port int) {
 	arc.originalDstIP = ip
 	arc.originalDstPort = port
 	arc.oriRemoteAddr, _ = net.ResolveTCPAddr("", ip+":"+strconv.Itoa(port))
 	log.DefaultLogger.Infof("conn set origin addr:%s:%d", ip, port)
 }
 
-func (arc *activeRawConn) ContinueFilterChain(success bool, ctx context.Context) {
-	if success {
-		for ; arc.accptedFilterIndex < len(arc.acceptedFilters); arc.accptedFilterIndex++ {
-			filterStatus := arc.acceptedFilters[arc.accptedFilterIndex].OnAccept(arc)
+func (arc *activeRawConn) HandOffRestoredDestinationConnectionsHandler() {
+	var listener, localListener *activeListener
 
-			if filterStatus == types.StopIteration {
-				return
-			}
+	for _, lst := range arc.activeListener.handler.listeners {
+		if lst.listenIP == arc.originalDstIP && lst.listenPort == arc.originalDstPort {
+			listener = lst
+			break
 		}
 
-		// TODO: handle hand_off_restored_destination_connections logic
-		if arc.handOffRestoredDestinationConnections {
-			var _lst, _ls2 *activeListener
-
-			for _, lst := range arc.activeListener.handler.listeners {
-				if lst.listenIP == arc.originalDstIP && lst.listenPort == arc.originalDstPort {
-					_lst = lst
-					break
-				}
-
-				if lst.listenPort == arc.originalDstPort && lst.listenIP == "0.0.0.0" {
-					_ls2 = lst
-				}
-			}
-
-			if _lst != nil {
-				log.DefaultLogger.Infof("original dst:%s:%d", _lst.listenIP, _lst.listenPort)
-				_lst.OnAccept(arc.rawc, false, arc.oriRemoteAddr)
-			} else if _ls2 != nil {
-				log.DefaultLogger.Infof("original dst:%s:%d", _ls2.listenIP, _ls2.listenPort)
-				_ls2.OnAccept(arc.rawc, false, arc.oriRemoteAddr)
-			}
-
-		} else {
-			arc.activeListener.newConnection(arc.rawc, ctx)
+		if lst.listenPort == arc.originalDstPort && lst.listenIP == "0.0.0.0" {
+			localListener = lst
 		}
-
 	}
+
+	if listener != nil {
+		log.DefaultLogger.Infof("original dst:%s:%d", listener.listenIP, listener.listenPort)
+		listener.OnAccept(arc.rawc, false, arc.oriRemoteAddr, nil, nil)
+	}
+	if localListener != nil {
+		log.DefaultLogger.Infof("original dst:%s:%d", localListener.listenIP, localListener.listenPort)
+		localListener.OnAccept(arc.rawc, false, arc.oriRemoteAddr, nil, nil)
+	}
+}
+
+func (arc *activeRawConn) ContinueFilterChain(ctx context.Context, success bool) {
+
+	if !success {
+		return
+	}
+
+	for ; arc.acceptedFilterIndex < len(arc.acceptedFilters); arc.acceptedFilterIndex++ {
+		filterStatus := arc.acceptedFilters[arc.acceptedFilterIndex].OnAccept(arc)
+		if filterStatus == types.StopIteration {
+			return
+		}
+	}
+
+	// TODO: handle hand_off_restored_destination_connections logic
+	if arc.handOffRestoredDestinationConnections {
+		arc.HandOffRestoredDestinationConnectionsHandler()
+	} else {
+		arc.activeListener.newConnection(ctx, arc.rawc)
+	}
+
 }
 
 func (arc *activeRawConn) Conn() net.Conn {

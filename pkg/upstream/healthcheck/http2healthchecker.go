@@ -14,17 +14,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package healthcheck
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/protocol"
-	"github.com/alipay/sofamosn/pkg/stream"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/protocol"
+	"github.com/alipay/sofa-mosn/pkg/stream"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 type http2HealthChecker struct {
@@ -33,7 +35,7 @@ type http2HealthChecker struct {
 	serviceName string
 }
 
-func newHttpHealthCheck(config v2.HealthCheck) types.HealthChecker {
+func newHTTPHealthCheck(config v2.HealthCheck) types.HealthChecker {
 	hc := newHealthChecker(config)
 
 	hhc := &http2HealthChecker{
@@ -59,7 +61,7 @@ func (c *http2HealthChecker) newSession(host types.Host) types.HealthCheckSessio
 }
 
 func (c *http2HealthChecker) createCodecClient(data types.CreateConnectionData) stream.CodecClient {
-	return stream.NewCodecClient(nil, protocol.Http2, data.Connection, data.HostInfo)
+	return stream.NewCodecClient(context.Background(), protocol.HTTP2, data.Connection, data.HostInfo)
 }
 
 // types.StreamReceiver
@@ -74,7 +76,7 @@ type http2HealthCheckSession struct {
 }
 
 // // types.StreamReceiver
-func (s *http2HealthCheckSession) OnReceiveHeaders(headers map[string]string, endStream bool) {
+func (s *http2HealthCheckSession) OnReceiveHeaders(context context.Context, headers map[string]string, endStream bool) {
 	s.responseHeaders = headers
 
 	if endStream {
@@ -82,17 +84,17 @@ func (s *http2HealthCheckSession) OnReceiveHeaders(headers map[string]string, en
 	}
 }
 
-func (s *http2HealthCheckSession) OnReceiveData(data types.IoBuffer, endStream bool) {
+func (s *http2HealthCheckSession) OnReceiveData(context context.Context, data types.IoBuffer, endStream bool) {
 	if endStream {
 		s.onResponseComplete()
 	}
 }
 
-func (s *http2HealthCheckSession) OnReceiveTrailers(trailers map[string]string) {
+func (s *http2HealthCheckSession) OnReceiveTrailers(context context.Context, trailers map[string]string) {
 	s.onResponseComplete()
 }
 
-func (s *http2HealthCheckSession) OnDecodeError(err error, headers map[string]string) {
+func (s *http2HealthCheckSession) OnDecodeError(context context.Context, err error, headers map[string]string) {
 }
 
 // overload healthCheckSession
@@ -107,16 +109,16 @@ func (s *http2HealthCheckSession) onInterval() {
 		s.expectReset = false
 	}
 
-	s.requestSender = s.client.NewStream("", s)
+	s.requestSender = s.client.NewStream(context.Background(), "", s)
 	s.requestSender.GetStream().AddEventListener(s)
 
 	reqHeaders := map[string]string{
-		types.HeaderMethod: http.MethodGet,
-		types.HeaderHost:   s.healthChecker.cluster.Info().Name(),
-		protocol.MosnHeaderPathKey:   s.healthChecker.checkPath,
+		types.HeaderMethod:         http.MethodGet,
+		types.HeaderHost:           s.healthChecker.cluster.Info().Name(),
+		protocol.MosnHeaderPathKey: s.healthChecker.checkPath,
 	}
 
-	s.requestSender.AppendHeaders(reqHeaders, true)
+	s.requestSender.AppendHeaders(context.Background(), reqHeaders, true)
 	s.requestSender = nil
 
 	s.healthCheckSession.onInterval()

@@ -14,13 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package proxy
 
 import (
+	"github.com/alipay/sofa-mosn/pkg/stats"
 	"github.com/rcrowley/go-metrics"
-	"github.com/alipay/sofamosn/pkg/stats"
 )
 
+// downstream stats key
 const (
 	DownstreamConnectionTotal   = "downstream_connection_total"
 	DownstreamConnectionDestroy = "downstream_connection_destroy"

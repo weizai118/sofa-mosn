@@ -14,34 +14,31 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package http2
 
 import (
-	"container/list"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"crypto/tls"
-
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/network/buffer"
-	"github.com/alipay/sofamosn/pkg/protocol"
-	str "github.com/alipay/sofamosn/pkg/stream"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/buffer"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/protocol"
+	str "github.com/alipay/sofa-mosn/pkg/stream"
+	"github.com/alipay/sofa-mosn/pkg/types"
 	"golang.org/x/net/http2"
 )
 
 func init() {
-	str.Register(protocol.Http2, &streamConnFactory{})
+	str.Register(protocol.HTTP2, &streamConnFactory{})
 }
 
 type streamConnFactory struct{}
@@ -62,7 +59,6 @@ func (f *streamConnFactory) CreateBiDirectStream(context context.Context, connec
 	return nil
 }
 
-var transport http2.Transport
 var server http2.Server
 
 // types.StreamConnection
@@ -71,9 +67,8 @@ type streamConnection struct {
 	context context.Context
 
 	protocol      types.Protocol
-	rawConnection net.Conn
+	connection    types.Connection
 	http2Conn     *http2.ClientConn
-	activeStreams *list.List
 	asMutex       sync.Mutex
 	connCallbacks types.ConnectionEventListener
 
@@ -81,7 +76,8 @@ type streamConnection struct {
 }
 
 // types.StreamConnection
-func (conn *streamConnection) Dispatch(buffer types.IoBuffer) {}
+func (conn *streamConnection) Dispatch(buffer types.IoBuffer) {
+}
 
 func (conn *streamConnection) Protocol() types.Protocol {
 	return conn.protocol
@@ -101,15 +97,14 @@ func newClientStreamConnection(context context.Context, connection types.ClientC
 	streamConnCallbacks types.StreamConnectionEventListener,
 	connCallbacks types.ConnectionEventListener) types.ClientStreamConnection {
 
-	h2Conn, _ := transport.NewClientConn(connection.RawConn())
-
+	log.DefaultLogger.Tracef("new http2 client stream connection")
 	return &clientStreamConnection{
 		streamConnection: streamConnection{
 			context:       context,
-			rawConnection: connection.RawConn(),
-			http2Conn:     h2Conn,
-			activeStreams: list.New(),
+			connection:    connection,
+			http2Conn:     context.Value(H2ConnKey).(*http2.ClientConn),
 			connCallbacks: connCallbacks,
+			logger:        log.ByContext(context),
 		},
 		streamConnCallbacks: streamConnCallbacks,
 	}
@@ -119,18 +114,15 @@ func (csc *clientStreamConnection) OnGoAway() {
 	csc.streamConnCallbacks.OnGoAway()
 }
 
-func (csc *clientStreamConnection) NewStream(streamId string, responseDecoder types.StreamReceiver) types.StreamSender {
+func (csc *clientStreamConnection) NewStream(ctx context.Context, streamID string, responseDecoder types.StreamReceiver) types.StreamSender {
+	log.DefaultLogger.Tracef("http2 client stream connection new stream , stream id = %v", streamID)
 	stream := &clientStream{
 		stream: stream{
-			context: context.WithValue(csc.context, types.ContextKeyStreamId, streamId),
+			context: context.WithValue(ctx, types.ContextKeyStreamID, streamID),
 			decoder: responseDecoder,
 		},
 		connection: csc,
 	}
-
-	csc.asMutex.Lock()
-	stream.element = csc.activeStreams.PushBack(stream)
-	csc.asMutex.Unlock()
 
 	return stream
 }
@@ -143,20 +135,22 @@ type serverStreamConnection struct {
 
 func newServerStreamConnection(context context.Context, connection types.Connection,
 	callbacks types.ServerStreamConnectionEventListener) types.ServerStreamConnection {
+	log.DefaultLogger.Tracef("new http2 server stream connection")
 	connection.SetReadDisable(true)
 	ssc := &serverStreamConnection{
 		streamConnection: streamConnection{
-			context:       context,
-			rawConnection: connection.RawConn(),
-			activeStreams: list.New(),
+			context:    context,
+			connection: connection,
 		},
 		serverStreamConnCallbacks: callbacks,
 	}
-	if tlsConn, ok := ssc.rawConnection.(*tls.Conn); ok {
+
+	if tlsConn, ok := ssc.connection.RawConn().(*tls.Conn); ok {
 
 		if err := tlsConn.Handshake(); err != nil {
 			logger := log.ByContext(context)
-			logger.Errorf("TLS handshake error from %s: %v", ssc.rawConnection.RemoteAddr(), err)
+			logger.Errorf("TLS handshake error from %s: %v", ssc.connection.RemoteAddr(), err)
+
 			return nil
 		}
 	}
@@ -174,30 +168,31 @@ func (ssc *serverStreamConnection) OnGoAway() {
 
 //作为PROXY的STREAM SERVER
 func (ssc *serverStreamConnection) ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) {
-	//generate stream id using timestamp
-	streamId := "streamID-" + time.Now().String()
+	//generate stream id using global counter
+	streamID := protocol.GenerateIDString()
 
 	stream := &serverStream{
 		stream: stream{
-			context: context.WithValue(ssc.context, types.ContextKeyStreamId, streamId),
+			context: context.WithValue(ssc.context, types.ContextKeyStreamID, streamID),
 			request: request,
 		},
 		connection:       ssc,
 		responseWriter:   responseWriter,
-		responseDoneChan: make(chan bool, 1),
+		responseDoneChan: make(chan struct{}),
 	}
-	stream.decoder = ssc.serverStreamConnCallbacks.NewStream(streamId, stream)
-	ssc.asMutex.Lock()
-	stream.element = ssc.activeStreams.PushBack(stream)
-	ssc.asMutex.Unlock()
+	stream.decoder = ssc.serverStreamConnCallbacks.NewStream(stream.stream.context, streamID, stream)
 
 	if atomic.LoadInt32(&stream.readDisableCount) <= 0 {
+		defer func() {
+			if rec := recover(); rec != nil {
+				stream.responseWriter = nil
+			}
+		}()
+
 		stream.handleRequest()
 	}
 
-	select {
-	case <-stream.responseDoneChan:
-	}
+	<-stream.responseDoneChan
 }
 
 // types.Stream
@@ -209,7 +204,6 @@ type stream struct {
 	request          *http.Request
 	response         *http.Response
 	decoder          types.StreamReceiver
-	element          *list.Element
 	streamCbs        []types.StreamEventListener
 }
 
@@ -245,41 +239,44 @@ type clientStream struct {
 }
 
 // types.StreamSender
-func (s *clientStream) AppendHeaders(headers_ interface{}, endStream bool) error {
-	log.StartLogger.Tracef("http2 client stream encode headers")
-	headers, _ := headers_.(map[string]string)
+func (s *clientStream) AppendHeaders(context context.Context, headers interface{}, endStream bool) error {
+	log.DefaultLogger.Tracef("http2 client stream encode headers")
+	headersMap, _ := headers.(map[string]string)
 
 	if s.request == nil {
 		s.request = new(http.Request)
 		s.request.Method = http.MethodGet
 		s.request.URL, _ = url.Parse(fmt.Sprintf("http://%s/",
-			s.connection.rawConnection.RemoteAddr().String()))
+			s.connection.connection.RemoteAddr().String()))
 	}
 
-	if method, ok := headers[types.HeaderMethod]; ok {
-		s.request.Method = method
-		delete(headers, types.HeaderMethod)
-	}
-
-	if host, ok := headers[types.HeaderHost]; ok {
-		s.request.Host = host
-		delete(headers, types.HeaderHost)
-	}
-
-	if path, ok := headers[protocol.MosnHeaderPathKey]; ok {
+	if path, ok := headersMap[protocol.MosnHeaderPathKey]; ok {
 		s.request.URL, _ = url.Parse(fmt.Sprintf("http://%s%s",
-			s.connection.rawConnection.RemoteAddr().String(), path))
-		delete(headers, protocol.MosnHeaderPathKey)
+			s.connection.connection.RemoteAddr().String(), path))
+		delete(headersMap, protocol.MosnHeaderPathKey)
 	}
 
-	if _, ok := headers["Host"]; ok {
-		headers["Host"] = s.connection.rawConnection.RemoteAddr().String()
-		s.request.Host = s.connection.rawConnection.RemoteAddr().String()
+	if _, ok := headersMap["Host"]; ok {
+		headersMap["Host"] = s.connection.connection.RemoteAddr().String()
+		s.request.Host = s.connection.connection.RemoteAddr().String()
 	}
 
-	s.request.Header = encodeHeader(headers)
+	// delete inner header
+	if _, ok := headersMap[protocol.MosnHeaderQueryStringKey]; ok {
+		delete(headersMap, protocol.MosnHeaderQueryStringKey)
+	}
 
-	log.StartLogger.Tracef("http2 client stream encode headers,headers = %v", s.request.Header)
+	if _, ok := headersMap[protocol.MosnHeaderMethod]; ok {
+		delete(headersMap, protocol.MosnHeaderMethod)
+	}
+
+	if _, ok := headersMap[protocol.MosnHeaderHostKey]; ok {
+		delete(headersMap, protocol.MosnHeaderHostKey)
+	}
+
+	s.request.Header = encodeHeader(headersMap)
+
+	log.DefaultLogger.Tracef("http2 client stream encode headers,headers = %v", s.request.Header)
 
 	if endStream {
 		s.endStream()
@@ -288,8 +285,8 @@ func (s *clientStream) AppendHeaders(headers_ interface{}, endStream bool) error
 	return nil
 }
 
-func (s *clientStream) AppendData(data types.IoBuffer, endStream bool) error {
-	log.StartLogger.Tracef("http2 client stream encode data")
+func (s *clientStream) AppendData(context context.Context, data types.IoBuffer, endStream bool) error {
+	log.DefaultLogger.Tracef("http2 client stream encode data")
 	if s.request == nil {
 		s.request = new(http.Request)
 	}
@@ -299,7 +296,7 @@ func (s *clientStream) AppendData(data types.IoBuffer, endStream bool) error {
 		buf: data,
 	}
 
-	log.StartLogger.Tracef("http2 client stream encode data,data = %v", data.String())
+	log.DefaultLogger.Tracef("http2 client stream encode data,data = %v", data.String())
 
 	if endStream {
 		s.endStream()
@@ -308,8 +305,8 @@ func (s *clientStream) AppendData(data types.IoBuffer, endStream bool) error {
 	return nil
 }
 
-func (s *clientStream) AppendTrailers(trailers map[string]string) error {
-	log.StartLogger.Tracef("http2 client stream encode trailers")
+func (s *clientStream) AppendTrailers(context context.Context, trailers map[string]string) error {
+	log.DefaultLogger.Tracef("http2 client stream encode trailers")
 	s.request.Trailer = encodeHeader(trailers)
 	s.endStream()
 
@@ -317,7 +314,7 @@ func (s *clientStream) AppendTrailers(trailers map[string]string) error {
 }
 
 func (s *clientStream) endStream() {
-	s.doSend()
+	go s.doSend()
 }
 
 func (s *clientStream) ReadDisable(disable bool) {
@@ -336,8 +333,10 @@ func (s *clientStream) ReadDisable(disable bool) {
 
 func (s *clientStream) doSend() {
 	resp, err := s.connection.http2Conn.RoundTrip(s.request)
+
 	if err != nil {
-		log.StartLogger.Tracef("http2 client stream send error %v", err)
+		log.StartLogger.Errorf("http2 client stream send error %v", err)
+
 		// due to we use golang h2 conn impl, we need to do some adapt to some things observable
 		switch err.(type) {
 		case http2.StreamError:
@@ -349,14 +348,13 @@ func (s *clientStream) doSend() {
 		case error:
 			// todo: target remote close event
 			if err == io.EOF {
-				s.connection.connCallbacks.OnEvent(types.RemoteClose)
+				s.connection.connection.Close(types.NoFlush, types.RemoteClose)
 			} else if err.Error() == "http2: client conn is closed" {
-				// we dont use mosn io impl, so get connection state from golang h2 io read/write loop
-				s.connection.connCallbacks.OnEvent(types.LocalClose)
+				// we don't use mosn io impl, so get connection state from golang h2 io read/write loop
+				s.connection.connection.Close(types.NoFlush, types.LocalClose)
 			} else if err.Error() == "http2: client conn not usable" {
 				// raise overflow event to let conn pool taking action
 				s.ResetStream(types.StreamOverflow)
-
 			} else if err.Error() == "http2: Transport received Server's graceful shutdown GOAWAY" {
 				s.connection.streamConnCallbacks.OnGoAway()
 			} else if err.Error() == "http2: Transport received Server's graceful shutdown GOAWAY; some request body already written" {
@@ -367,8 +365,9 @@ func (s *clientStream) doSend() {
 				s.ResetStream(types.StreamLocalReset)
 			} else {
 				s.connection.logger.Errorf("Unknown err: %v", err)
-				s.ResetStream(types.StreamConnectionFailed)
+				s.connection.connection.Close(types.NoFlush, types.RemoteClose)
 			}
+
 			s.CleanStream()
 		}
 	} else {
@@ -382,22 +381,19 @@ func (s *clientStream) doSend() {
 func (s *clientStream) CleanStream() {
 	s.connection.asMutex.Lock()
 	s.response = nil
-	s.connection.activeStreams.Remove(s.element)
 	s.connection.asMutex.Unlock()
 }
 
 func (s *clientStream) handleResponse() {
 	if s.response != nil {
-		s.decoder.OnReceiveHeaders(decodeHeader(s.response.Header), false)
-		buf := &buffer.IoBuffer{}
+		s.decoder.OnReceiveHeaders(s.context, decodeRespHeader(s.response), false)
+		buf := buffer.NewIoBuffer(1024)
 		buf.ReadFrom(s.response.Body)
-		s.decoder.OnReceiveData(buf, false)
-		s.decoder.OnReceiveTrailers(decodeHeader(s.response.Trailer))
+		s.decoder.OnReceiveData(s.context, buf, false)
+		s.decoder.OnReceiveTrailers(s.context, decodeHeader(s.response.Trailer))
 
 		s.connection.asMutex.Lock()
 		s.response = nil
-		s.connection.activeStreams.Remove(s.element)
-		s.element = nil
 		s.connection.asMutex.Unlock()
 	}
 }
@@ -410,32 +406,35 @@ type serverStream struct {
 	stream
 	connection       *serverStreamConnection
 	responseWriter   http.ResponseWriter
-	responseDoneChan chan bool
+	responseDone     uint32
+	responseDoneChan chan struct{}
 }
 
 // types.StreamSender
-func (s *serverStream) AppendHeaders(headers_ interface{}, endStream bool) error {
-	headers, _ := headers_.(map[string]string)
+func (s *serverStream) AppendHeaders(context context.Context, headersIn interface{}, endStream bool) error {
+	headers, _ := headersIn.(map[string]string)
 
 	if s.response == nil {
 		s.response = new(http.Response)
+	}
+
+	if value, ok := headers[types.HeaderStatus]; ok {
+		s.response.StatusCode, _ = strconv.Atoi(value)
+		delete(headers, types.HeaderStatus)
+	} else {
 		s.response.StatusCode = 200
 	}
 
 	s.response.Header = encodeHeader(headers)
 
-	if status := s.response.Header.Get(types.HeaderStatus); status != "" {
-		s.response.StatusCode, _ = strconv.Atoi(status)
-		s.response.Header.Del(types.HeaderStatus)
-	}
-
 	if endStream {
 		s.endStream()
 	}
+
 	return nil
 }
 
-func (s *serverStream) AppendData(data types.IoBuffer, endStream bool) error {
+func (s *serverStream) AppendData(context context.Context, data types.IoBuffer, endStream bool) error {
 	if s.response == nil {
 		s.response = new(http.Response)
 	}
@@ -450,7 +449,7 @@ func (s *serverStream) AppendData(data types.IoBuffer, endStream bool) error {
 	return nil
 }
 
-func (s *serverStream) AppendTrailers(trailers map[string]string) error {
+func (s *serverStream) AppendTrailers(context context.Context, trailers map[string]string) error {
 	s.response.Trailer = encodeHeader(trailers)
 
 	s.endStream()
@@ -459,12 +458,19 @@ func (s *serverStream) AppendTrailers(trailers map[string]string) error {
 
 func (s *serverStream) endStream() {
 	s.doSend()
-	s.responseDoneChan <- true
 
-	s.connection.asMutex.Lock()
-	s.connection.activeStreams.Remove(s.element)
-	s.element = nil
-	s.connection.asMutex.Unlock()
+	if atomic.CompareAndSwapUint32(&s.responseDone, 0, 1) {
+		close(s.responseDoneChan)
+	}
+}
+
+func (s *serverStream) ResetStream(reason types.StreamResetReason) {
+	// on stream reset
+	if atomic.CompareAndSwapUint32(&s.responseDone, 0, 1) {
+		close(s.responseDoneChan)
+	}
+
+	s.stream.ResetStream(reason)
 }
 
 func (s *serverStream) ReadDisable(disable bool) {
@@ -482,6 +488,12 @@ func (s *serverStream) ReadDisable(disable bool) {
 }
 
 func (s *serverStream) doSend() {
+	if s.responseWriter == nil {
+		s.connection.logger.Warnf("responseWriter is nil, send stream is ignored")
+
+		return
+	}
+
 	for key, values := range s.response.Header {
 		for _, value := range values {
 			s.responseWriter.Header().Add(key, value)
@@ -491,7 +503,7 @@ func (s *serverStream) doSend() {
 	s.responseWriter.WriteHeader(s.response.StatusCode)
 
 	if s.response.Body != nil {
-		buf := &buffer.IoBuffer{}
+		buf := buffer.NewIoBuffer(1024)
 		buf.ReadFrom(s.response.Body)
 		buf.WriteTo(s.responseWriter)
 	}
@@ -499,15 +511,35 @@ func (s *serverStream) doSend() {
 
 func (s *serverStream) handleRequest() {
 	if s.request != nil {
-		s.decoder.OnReceiveHeaders(decodeHeader(s.request.Header), false)
+
+		header := decodeHeader(s.request.Header)
+
+		// set host header if not found, just for insurance
+		if _, ok := header[protocol.MosnHeaderHostKey]; !ok {
+			header[protocol.MosnHeaderHostKey] = s.request.Host
+		}
+
+		// set path header if not found
+		path, queryString := parsePathFromURI(s.request.RequestURI)
+
+		if _, ok := header[protocol.MosnHeaderPathKey]; !ok {
+			header[protocol.MosnHeaderPathKey] = string(path)
+		}
+
+		// set query string header if not found
+		if _, ok := header[protocol.MosnHeaderQueryStringKey]; !ok {
+			header[protocol.MosnHeaderQueryStringKey] = string(queryString)
+		}
+
+		s.decoder.OnReceiveHeaders(s.context, header, false)
 
 		//remove detect
-		if s.element != nil {
-			buf := &buffer.IoBuffer{}
-			buf.ReadFrom(s.request.Body)
-			s.decoder.OnReceiveData(buf, false)
-			s.decoder.OnReceiveTrailers(decodeHeader(s.request.Trailer))
-		}
+		//if s.element != nil {
+		buf := buffer.NewIoBuffer(1024)
+		buf.ReadFrom(s.request.Body)
+		s.decoder.OnReceiveData(s.context, buf, false)
+		s.decoder.OnReceiveTrailers(s.context, decodeHeader(s.request.Trailer))
+		//}
 	}
 }
 
@@ -533,7 +565,17 @@ func decodeHeader(in map[string][]string) (out map[string]string) {
 		out[strings.ToLower(k)] = strings.Join(v, ",")
 	}
 
+	// inherit upstream's response status
 	return
+}
+
+func decodeRespHeader(resp *http.Response) (out map[string]string) {
+	header := decodeHeader(resp.Header)
+
+	// inherit upstream's response status
+	header[types.HeaderStatus] = strconv.Itoa(resp.StatusCode)
+
+	return header
 }
 
 // io.ReadCloser
@@ -548,4 +590,20 @@ func (rc *IoBufferReadCloser) Read(p []byte) (n int, err error) {
 func (rc *IoBufferReadCloser) Close() error {
 	rc.buf.Reset()
 	return nil
+}
+
+// GET /rest/1.0/file?fields=P_G&bz=test
+// return path and query string
+func parsePathFromURI(requestURI string) (string, string) {
+
+	if "" == requestURI {
+		return "", ""
+	}
+
+	queryMaps := strings.Split(requestURI, "?")
+	if len(queryMaps) > 1 {
+		return queryMaps[0], queryMaps[1]
+	}
+	return queryMaps[0], ""
+
 }

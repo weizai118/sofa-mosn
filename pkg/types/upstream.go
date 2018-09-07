@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package types
 
 import (
@@ -21,8 +22,8 @@ import (
 	"net"
 	"sort"
 
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
 	"github.com/rcrowley/go-metrics"
-	"github.com/alipay/sofamosn/pkg/api/v2"
 )
 
 //   Below is the basic relation between clusterManager, cluster, hostSet, and hosts:
@@ -30,29 +31,31 @@ import (
 //           1              * | 1                1 | 1                *| 1          *
 //   clusterManager --------- cluster  --------- prioritySet --------- hostSet------hosts
 
-// Manage connection pools and load balancing for upstream clusters.
+// ClusterManager manages connection pools and load balancing for upstream clusters.
 type ClusterManager interface {
 	// Add or update a cluster via API.
 	AddOrUpdatePrimaryCluster(cluster v2.Cluster) bool
 
 	SetInitializedCb(cb func())
 
+	// Clusters, return all cluster belongs to this clustermng
 	Clusters() map[string]Cluster
 
+	// Get, use to get the snapshot of a cluster
 	Get(context context.Context, cluster string) ClusterSnapshot
 
+	// UpdateClusterHosts used to update cluster's hosts
 	// temp interface todo: remove it
 	UpdateClusterHosts(cluster string, priority uint32, hosts []v2.Host) error
 
-	HttpConnPoolForCluster(cluster string, protocol Protocol, balancerContext LoadBalancerContext) ConnectionPool
+	// Get or Create tcp conn pool for a cluster
+	TCPConnForCluster(balancerContext LoadBalancerContext, cluster string) CreateConnectionData
 
-	XprotocolConnPoolForCluster(cluster string, protocol Protocol,balancerContext LoadBalancerContext) ConnectionPool
+	// ConnPoolForCluster used to get protocol related conn pool
+	ConnPoolForCluster(balancerContext LoadBalancerContext, cluster string, protocol Protocol) ConnectionPool
 
-	TcpConnForCluster(cluster string,balancerContext LoadBalancerContext) CreateConnectionData
-
-	SofaRpcConnPoolForCluster(cluster string, balancerContext LoadBalancerContext) ConnectionPool
-
-	RemovePrimaryCluster(cluster string) bool
+	// RemovePrimaryCluster used to remove cluster from set
+	RemovePrimaryCluster(cluster string) error
 
 	Shutdown() error
 
@@ -62,12 +65,17 @@ type ClusterManager interface {
 
 	LocalClusterName() string
 
+	// ClusterExist, used to check whether 'clusterName' exist or not
 	ClusterExist(clusterName string) bool
 
-	RemoveClusterHosts(clusterName string, host Host) error
+	// RemoveClusterHost, used to remove cluster's hosts
+	RemoveClusterHost(clusterName string, hostAddress string) error
+
+	// Destory the cluster manager
+	Destory()
 }
 
-// thread-safe cluster snapshot
+// ClusterSnapshot is a thread-safe cluster snapshot
 type ClusterSnapshot interface {
 	PrioritySet() PrioritySet
 
@@ -76,7 +84,7 @@ type ClusterSnapshot interface {
 	LoadBalancer() LoadBalancer
 }
 
-// An upstream cluster (group of hosts).
+// Cluster is a group of upstream hosts
 type Cluster interface {
 	Initialize(cb func())
 
@@ -95,19 +103,22 @@ type Cluster interface {
 	OutlierDetector() Detector
 }
 
+// InitializePhase type
 type InitializePhase string
 
+// InitializePhase types
 const (
 	Primary   InitializePhase = "Primary"
 	Secondary InitializePhase = "Secondary"
 )
 
+// MemberUpdateCallback is called on create a priority set
 type MemberUpdateCallback func(priority uint32, hostsAdded []Host, hostsRemoved []Host)
 
 // PrioritySet is a hostSet grouped by priority for a given cluster, for ease of load balancing.
 type PrioritySet interface {
 
-	// Get the hostSet for this priority level, creating it if not exist.
+	// GetOrCreateHostSet returns the hostSet for this priority level, creating it if not exist.
 	GetOrCreateHostSet(priority uint32) HostSet
 
 	AddMemberUpdateCb(cb MemberUpdateCallback)
@@ -136,6 +147,7 @@ type HostSet interface {
 	Priority() uint32
 }
 
+// HealthFlag type
 type HealthFlag int
 
 const (
@@ -145,7 +157,7 @@ const (
 	FAILED_OUTLIER_CHECK HealthFlag = 0x02
 )
 
-// An upstream host
+// Host is an upstream host
 type Host interface {
 	HostInfo
 
@@ -177,6 +189,7 @@ type Host interface {
 	SetUsed(used bool)
 }
 
+// HostInfo defines a host's basic information
 type HostInfo interface {
 	Hostname() string
 
@@ -199,14 +212,15 @@ type HostInfo interface {
 	// TODO: add deploy locality
 }
 
+// HostStats defines a host's statistics information
 type HostStats struct {
 	Namespace                                      string
 	UpstreamConnectionTotal                        metrics.Counter
 	UpstreamConnectionClose                        metrics.Counter
 	UpstreamConnectionActive                       metrics.Counter
-	UpstreamConnectionTotalHttp1                   metrics.Counter
-	UpstreamConnectionTotalHttp2                   metrics.Counter
-	UpstreamConnectionTotalSofaRpc                 metrics.Counter
+	UpstreamConnectionTotalHTTP1                   metrics.Counter
+	UpstreamConnectionTotalHTTP2                   metrics.Counter
+	UpstreamConnectionTotalSofaRPC                 metrics.Counter
 	UpstreamConnectionConFail                      metrics.Counter
 	UpstreamConnectionLocalClose                   metrics.Counter
 	UpstreamConnectionRemoteClose                  metrics.Counter
@@ -222,12 +236,13 @@ type HostStats struct {
 	UpstreamRequestPendingOverflow                 metrics.Counter
 }
 
+// ClusterInfo defines a cluster's information
 type ClusterInfo interface {
 	Name() string
 
 	LbType() LoadBalancerType
 
-	AddedViaApi() bool
+	AddedViaAPI() bool
 
 	SourceAddress() net.Addr
 
@@ -255,10 +270,11 @@ type ClusterInfo interface {
 	TLSMng() TLSContextManager
 
 	LbSubsetInfo() LBSubsetInfo
-	
+
 	LBInstance() LoadBalancer
 }
 
+// ResourceManager manages different types of Resource
 type ResourceManager interface {
 	// Connections resource to count connections in pool. Only used by protocol which has a connection pool which has multiple connections.
 	Connections() Resource
@@ -273,6 +289,7 @@ type ResourceManager interface {
 	Retries() Resource
 }
 
+// Resource is a interface to statistics information
 type Resource interface {
 	CanCreate() bool
 	Increase()
@@ -280,14 +297,15 @@ type Resource interface {
 	Max() uint64
 }
 
+// ClusterStats defines a cluster's statistics information
 type ClusterStats struct {
 	Namespace                                      string
 	UpstreamConnectionTotal                        metrics.Counter
 	UpstreamConnectionClose                        metrics.Counter
 	UpstreamConnectionActive                       metrics.Counter
-	UpstreamConnectionTotalHttp1                   metrics.Counter
-	UpstreamConnectionTotalHttp2                   metrics.Counter
-	UpstreamConnectionTotalSofaRpc                 metrics.Counter
+	UpstreamConnectionTotalHTTP1                   metrics.Counter
+	UpstreamConnectionTotalHTTP2                   metrics.Counter
+	UpstreamConnectionTotalSofaRPC                 metrics.Counter
 	UpstreamConnectionConFail                      metrics.Counter
 	UpstreamConnectionRetry                        metrics.Counter
 	UpstreamConnectionLocalClose                   metrics.Counter
@@ -319,15 +337,17 @@ type CreateConnectionData struct {
 	HostInfo   HostInfo
 }
 
-// a simple in mem cluster
+// SimpleCluster is a simple cluster in memory
 type SimpleCluster interface {
 	UpdateHosts(newHosts []Host)
 }
 
+// ClusterConfigFactoryCb is a callback interface
 type ClusterConfigFactoryCb interface {
 	UpdateClusterConfig(configs []v2.Cluster) error
 }
 
+// ClusterHostFactoryCb is a callback interface
 type ClusterHostFactoryCb interface {
 	UpdateClusterHost(cluster string, priority uint32, hosts []v2.Host) error
 }
@@ -336,6 +356,7 @@ type ClusterManagerFilter interface {
 	OnCreated(cccb ClusterConfigFactoryCb, chcb ClusterHostFactoryCb)
 }
 
+// RegisterUpstreamUpdateMethodCb is a callback interface
 type RegisterUpstreamUpdateMethodCb interface {
 	TriggerClusterUpdate(clusterName string, hosts []v2.Host)
 	GetClusterNameByServiceName(serviceName string) string
@@ -351,26 +372,28 @@ type LBSubsetInfo interface {
 	SubsetKeys() []SortedStringSetType
 }
 
-// realize a sorted string set(no duplicate)
+// SortedStringSetType is a sorted key collection with no duplicate
 type SortedStringSetType struct {
 	keys []string
 }
 
+// InitSet returns a SortedStringSetType
+// The input key will be sorted and deduplicated
 func InitSet(input []string) SortedStringSetType {
 	var ssst SortedStringSetType
 	var keys []string
 
 	for _, keyInput := range input {
-		exsit := false
+		exist := false
 
 		for _, keyIn := range keys {
 			if keyIn == keyInput {
-				exsit = true
+				exist = true
 				break
 			}
 		}
 
-		if !exsit {
+		if !exist {
 			keys = append(keys, keyInput)
 		}
 	}
@@ -380,45 +403,63 @@ func InitSet(input []string) SortedStringSetType {
 	return ssst
 }
 
+// Keys is the keys in the collection
 func (ss *SortedStringSetType) Keys() []string {
 	return ss.keys
 }
 
+// Len is the number of elements in the collection.
 func (ss *SortedStringSetType) Len() int {
 	return len(ss.keys)
 }
 
+// Less reports whether the element with
+// index i should sort before the element with index j.
 func (ss *SortedStringSetType) Less(i, j int) bool {
 	return ss.keys[i] < ss.keys[j]
 }
 
+// Swap swaps the elements with indexes i and j.
 func (ss *SortedStringSetType) Swap(i, j int) {
 	ss.keys[i], ss.keys[j] = ss.keys[j], ss.keys[i]
 }
 
+// SortedMap is a list of key-value pair
 type SortedMap []SortedPair
 
-// 使用pair，避免map输出时候的无序
+// InitSortedMap sorts the input map, and returns it as a list of sorted key-value pair
 func InitSortedMap(input map[string]string) SortedMap {
 	var keyset []string
-	var sPair  []SortedPair
-	
-	for k, _ := range input {
+	var sPair []SortedPair
+
+	for k := range input {
 		keyset = append(keyset, k)
 	}
 
 	sort.Strings(keyset)
 
 	for _, key := range keyset {
-		sPair = append(sPair,SortedPair{
-			key,input[key],
+		sPair = append(sPair, SortedPair{
+			key, input[key],
 		})
 	}
-	
+
 	return sPair
 }
 
+// SortedPair is a key-value pair
 type SortedPair struct {
 	Key   string
 	Value string
+}
+
+func init() {
+	ConnPoolFactories = make(map[Protocol]bool)
+}
+
+var ConnPoolFactories map[Protocol]bool
+
+func RegisterConnPoolFactory(protocol Protocol, registered bool) {
+	//other
+	ConnPoolFactories[protocol] = registered
 }

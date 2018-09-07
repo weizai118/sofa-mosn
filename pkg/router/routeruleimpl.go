@@ -14,43 +14,55 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package router
 
 import (
+	"math/rand"
 	"regexp"
 	"strings"
 	"time"
 
+	"sync"
+
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/protocol"
+	httpmosn "github.com/alipay/sofa-mosn/pkg/protocol/http"
+	"github.com/alipay/sofa-mosn/pkg/types"
 	multimap "github.com/jwangsadinata/go-multimap/slicemultimap"
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	//"github.com/alipay/sofamosn/pkg/protocol"
-	httpmosn "github.com/alipay/sofamosn/pkg/protocol/http"
-	"github.com/alipay/sofamosn/pkg/types"
-	"github.com/alipay/sofamosn/pkg/protocol"
 )
 
-func NewRouteRuleImplBase(vHost *VirtualHostImpl, route *v2.Router) RouteRuleImplBase {
+// NewRouteRuleImplBase
+// new routerule implement basement
+func NewRouteRuleImplBase(vHost *VirtualHostImpl, route *v2.Router) (RouteRuleImplBase, error) {
 	routeRuleImplBase := RouteRuleImplBase{
-		vHost:        vHost,
-		routerMatch:  route.Match,
-		routerAction: route.Route,
-		policy: &routerPolicy{
-			retryOn:      false,
-			retryTimeout: 0,
-			numRetries:   0,
-		},
+		vHost:         vHost,
+		routerMatch:   route.Match,
+		routerAction:  route.Route,
+		clusterName:   route.Route.ClusterName,
+		randInstance:  rand.New(rand.NewSource(time.Now().UnixNano())),
+		configHeaders: getRouterHeades(route.Match.Headers),
 	}
 
+	routeRuleImplBase.weightedClusters, routeRuleImplBase.totalClusterWeight = getWeightedClusterEntry(route.Route.WeightedClusters)
+
+	routeRuleImplBase.policy = &routerPolicy{
+		retryOn:      false,
+		retryTimeout: 0,
+		numRetries:   0,
+	}
+
+	// todo add header match to route base
 	// generate metadata match criteria from router's metadata
 	if len(route.Route.MetadataMatch) > 0 {
-		envoyLBMetaData := GetMosnLBMetaData(route)
-		routeRuleImplBase.metadataMatchCriteria = NewMetadataMatchCriteriaImpl(envoyLBMetaData)
+		subsetLBMetaData := route.Route.MetadataMatch
+		routeRuleImplBase.metadataMatchCriteria = NewMetadataMatchCriteriaImpl(subsetLBMetaData)
 
-		routeRuleImplBase.metaData = GetClusterMosnLBMetaDataMap(route.Route.MetadataMatch)
+		routeRuleImplBase.metaData = getClusterMosnLBMetaDataMap(route.Route.MetadataMatch)
 	}
 
-	return routeRuleImplBase
+	return routeRuleImplBase, nil
 }
 
 // Base implementation for all route entries.
@@ -65,40 +77,42 @@ type RouteRuleImplBase struct {
 	autoHostRewrite             bool
 	useWebSocket                bool
 	clusterName                 string //
-	clusterHeaderName           LowerCaseString
-	clusterNotFoundResponseCode httpmosn.HttpCode
+	clusterHeaderName           lowerCaseString
+	clusterNotFoundResponseCode httpmosn.Code
 	timeout                     time.Duration
 	runtime                     v2.RuntimeUInt32
 	hostRedirect                string
 	pathRedirect                string
 	httpsRedirect               bool
-	retryPolicy                 *RetryPolicyImpl
-	rateLimitPolicy             *RateLimitPolicyImpl
+	retryPolicy                 *retryPolicyImpl
+	rateLimitPolicy             *rateLimitPolicyImpl
 
 	routerAction v2.RouteAction
 	routerMatch  v2.RouterMatch
 
-	shadowPolicy          *ShadowPolicyImpl
+	shadowPolicy          *shadowPolicyImpl
 	priority              types.ResourcePriority
 	configHeaders         []*types.HeaderData //
 	configQueryParameters []types.QueryParameterMatcher
-	weightedClusters      []*WeightedClusterEntry
-	totalClusterWeight    uint64
-	hashPolicy            HashPolicyImpl
+	weightedClusters      map[string]weightedClusterEntry //key is the wcluster's name
+	totalClusterWeight    uint32
+	hashPolicy            hashPolicyImpl
 
 	metadataMatchCriteria *MetadataMatchCriteriaImpl
 	metaData              types.RouteMetaData
 
-	requestHeadersParser  *HeaderParser
-	responseHeadersParser *HeaderParser
+	requestHeadersParser  *headerParser
+	responseHeadersParser *headerParser
 
 	opaqueConfig multimap.MultiMap
 
 	decorator          *types.Decorator
-	directResponseCode httpmosn.HttpCode
+	directResponseCode httpmosn.Code
 	directResponseBody string
 	policy             *routerPolicy
 	virtualClusters    *VirtualClusterEntry
+	randInstance       *rand.Rand
+	randMutex          sync.Mutex
 }
 
 // types.RouterInfo
@@ -125,10 +139,28 @@ func (rri *RouteRuleImplBase) TraceDecorator() types.TraceDecorator {
 
 // types.RouteRule
 // Select Cluster for Routing
-// todo support weighted cluster
+// if weighted cluster is nil, return clusterName directly, else
+// select cluster from weighted-clusters
 func (rri *RouteRuleImplBase) ClusterName() string {
+	if len(rri.weightedClusters) == 0 {
+		return rri.clusterName
+	}
 
-	return rri.routerAction.ClusterName
+	// use randInstance to avoid global lock contention
+	rri.randMutex.Lock()
+	selectedValue := rri.randInstance.Intn(int(rri.totalClusterWeight))
+	rri.randMutex.Unlock()
+
+	for _, weightCluster := range rri.weightedClusters {
+
+		selectedValue = selectedValue - int(weightCluster.clusterWeight)
+		if selectedValue <= 0 {
+			return weightCluster.clusterName
+		}
+	}
+
+	log.DefaultLogger.Errorf("Something wrong when choosing weighted cluster")
+	return rri.clusterName
 }
 
 func (rri *RouteRuleImplBase) GlobalTimeout() time.Duration {
@@ -160,7 +192,12 @@ func (rri *RouteRuleImplBase) Metadata() types.RouteMetaData {
 	return rri.metaData
 }
 
-func (rri *RouteRuleImplBase) MetadataMatchCriteria() types.MetadataMatchCriteria {
+func (rri *RouteRuleImplBase) MetadataMatchCriteria(clusterName string) types.MetadataMatchCriteria {
+	// if clusterName belongs to a weighted cluster
+	if matchCriteria, ok := rri.weightedClusters[clusterName]; ok {
+		return matchCriteria.clusterMetadataMatchCriteria
+	}
+
 	return rri.metadataMatchCriteria
 }
 
@@ -173,23 +210,31 @@ func (rri *RouteRuleImplBase) matchRoute(headers map[string]string, randomValue 
 	// todo check runtime
 	// 1. match headers' KV
 	if !ConfigUtilityInst.MatchHeaders(headers, rri.configHeaders) {
+		log.DefaultLogger.Errorf("RouteRuleImplBase matchRoute, match headers error")
 		return false
 	}
 
 	// 2. match query parameters
 	var queryParams types.QueryParams
 
-	if QueryString, ok := headers[types.HeaderQueryString]; ok {
+	if QueryString, ok := headers[protocol.MosnHeaderQueryStringKey]; ok {
 		queryParams = httpmosn.ParseQueryString(QueryString)
 	}
 
 	if len(queryParams) == 0 {
 		return true
-	} else {
-		return ConfigUtilityInst.MatchQueryParams(queryParams, rri.configQueryParameters)
+	}
+
+	if !ConfigUtilityInst.MatchQueryParams(queryParams, rri.configQueryParameters) {
+		log.DefaultLogger.Errorf("RouteRuleImplBase matchRoute, match query params error")
+		return false
 	}
 
 	return true
+}
+
+func (rri *RouteRuleImplBase) WeightedCluster() map[string]weightedClusterEntry {
+	return rri.weightedClusters
 }
 
 type SofaRouteRuleImpl struct {
@@ -212,12 +257,12 @@ func (srri *SofaRouteRuleImpl) Match(headers map[string]string, randomValue uint
 		if value == srri.matchValue || srri.matchValue == ".*" {
 			log.DefaultLogger.Debugf("Sofa router matches success")
 			return srri
-		} else {
-			log.DefaultLogger.Warnf(" Sofa router matches failure, service name = %s", value)
 		}
-	} else {
-		log.DefaultLogger.Warnf("No service key found in header, sofa router matcher failure")
+
+		log.DefaultLogger.Warnf(" Sofa router matches failure, service name = %s", value)
 	}
+
+	log.DefaultLogger.Debugf("No service key found in header, sofa router matcher failure")
 
 	return nil
 }
@@ -240,7 +285,7 @@ func (prri *PathRouteRuleImpl) MatchType() types.PathMatchType {
 // Exact Path Comparing
 func (prri *PathRouteRuleImpl) Match(headers map[string]string, randomValue uint64) types.Route {
 	// match base rule first
-	log.StartLogger.Tracef("path route rule match invoked")
+	log.StartLogger.Debugf("path route rule match invoked")
 	if prri.matchRoute(headers, randomValue) {
 
 		if headerPathValue, ok := headers[strings.ToLower(protocol.MosnHeaderPathKey)]; ok {
@@ -256,8 +301,8 @@ func (prri *PathRouteRuleImpl) Match(headers map[string]string, randomValue uint
 			}
 		}
 	}
-	log.DefaultLogger.Warnf("path route rule match failed")
-	
+	log.DefaultLogger.Debugf("path route rule match failed")
+
 	return nil
 }
 
@@ -289,14 +334,13 @@ func (prei *PrefixRouteRuleImpl) Match(headers map[string]string, randomValue ui
 		if headerPathValue, ok := headers[strings.ToLower(protocol.MosnHeaderPathKey)]; ok {
 
 			if strings.HasPrefix(headerPathValue, prei.prefix) {
-				log.DefaultLogger.Warnf("prefix route rule match success")
-				
+				log.DefaultLogger.Debugf("prefix route rule match success")
 				return prei
 			}
 		}
 	}
-	log.DefaultLogger.Warnf("prefix route rule match failed")
-	
+	log.DefaultLogger.Debugf("prefix route rule match failed")
+
 	return nil
 }
 
@@ -324,16 +368,16 @@ func (rrei *RegexRouteRuleImpl) MatchType() types.PathMatchType {
 func (rrei *RegexRouteRuleImpl) Match(headers map[string]string, randomValue uint64) types.Route {
 	if rrei.matchRoute(headers, randomValue) {
 		if headerPathValue, ok := headers[strings.ToLower(protocol.MosnHeaderPathKey)]; ok {
-			
+
 			if rrei.regexPattern.MatchString(headerPathValue) {
-				log.DefaultLogger.Warnf("regex route rule match success")
-				
+				log.DefaultLogger.Debugf("regex route rule match success")
+
 				return rrei
 			}
 		}
 	}
-	log.DefaultLogger.Warnf("regex route rule match failed")
-	
+	log.DefaultLogger.Debugf("regex route rule match failed")
+
 	return nil
 }
 

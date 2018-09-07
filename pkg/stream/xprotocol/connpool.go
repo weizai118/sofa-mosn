@@ -14,17 +14,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package xprotocol
 
 import (
 	"context"
 	"sync"
 
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/protocol"
-	str "github.com/alipay/sofamosn/pkg/stream"
-	"github.com/alipay/sofamosn/pkg/types"
+	"sync/atomic"
+
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/protocol"
+	"github.com/alipay/sofa-mosn/pkg/proxy"
+	str "github.com/alipay/sofa-mosn/pkg/stream"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
+
+func init() {
+	proxy.RegisterNewPoolFactory(protocol.Xprotocol, NewConnPool)
+	types.RegisterConnPoolFactory(protocol.Xprotocol, true)
+
+}
 
 // types.ConnectionPool
 type connPool struct {
@@ -34,22 +44,25 @@ type connPool struct {
 	host           types.Host
 }
 
+// NewConnPool for xprotocol upstream host
 func NewConnPool(host types.Host) types.ConnectionPool {
 	return &connPool{
 		host: host,
 	}
 }
 
+// Protocol return xprotocol
 func (p *connPool) Protocol() types.Protocol {
 	return protocol.Xprotocol
 }
 
+// DrainConnections no use
 func (p *connPool) DrainConnections() {}
 
-//由 PROXY 调用
-func (p *connPool) NewStream(context context.Context, streamId string, responseDecoder types.StreamReceiver,
+// NewStream invoked by Proxy
+func (p *connPool) NewStream(context context.Context, streamID string, responseDecoder types.StreamReceiver,
 	cb types.PoolEventListener) types.Cancellable {
-	log.StartLogger.Tracef("xprotocol conn pool new stream")
+	log.DefaultLogger.Tracef("xprotocol conn pool new stream")
 	p.mux.Lock()
 
 	if p.primaryClient == nil {
@@ -57,26 +70,32 @@ func (p *connPool) NewStream(context context.Context, streamId string, responseD
 	}
 	p.mux.Unlock()
 
+	if p.primaryClient == nil {
+		cb.OnFailure(streamID, types.ConnectionFailure, nil)
+		return nil
+	}
+
 	if !p.host.ClusterInfo().ResourceManager().Requests().CanCreate() {
-		cb.OnFailure(streamId, types.Overflow, nil)
+		cb.OnFailure(streamID, types.Overflow, nil)
 		p.host.HostStats().UpstreamRequestPendingOverflow.Inc(1)
 		p.host.ClusterInfo().Stats().UpstreamRequestPendingOverflow.Inc(1)
 	} else {
-		p.primaryClient.totalStream++
+		atomic.AddUint64(&p.primaryClient.totalStream, 1)
 		p.host.HostStats().UpstreamRequestTotal.Inc(1)
 		p.host.HostStats().UpstreamRequestActive.Inc(1)
 		p.host.ClusterInfo().Stats().UpstreamRequestTotal.Inc(1)
 		p.host.ClusterInfo().Stats().UpstreamRequestActive.Inc(1)
 		p.host.ClusterInfo().ResourceManager().Requests().Increase()
-		log.StartLogger.Tracef("xprotocol conn pool codec client new stream")
-		streamEncoder := p.primaryClient.codecClient.NewStream(streamId, responseDecoder)
-		log.StartLogger.Tracef("xprotocol conn pool codec client new stream success,invoked OnPoolReady")
-		cb.OnReady(streamId, streamEncoder, p.host)
+		log.DefaultLogger.Tracef("xprotocol conn pool codec client new stream")
+		streamEncoder := p.primaryClient.codecClient.NewStream(context, streamID, responseDecoder)
+		log.DefaultLogger.Tracef("xprotocol conn pool codec client new stream success,invoked OnPoolReady")
+		cb.OnReady(streamID, streamEncoder, p.host)
 	}
 
 	return nil
 }
 
+// Close close connection pool
 func (p *connPool) Close() {
 	p.mux.Lock()
 	defer p.mux.Unlock()
@@ -180,14 +199,14 @@ func newActiveClient(context context.Context, pool *connPool) *activeClient {
 		pool: pool,
 	}
 
-	log.StartLogger.Tracef("xprotocol new active client , try to create connection")
+	log.DefaultLogger.Tracef("xprotocol new active client , try to create connection")
 	data := pool.host.CreateConnection(context)
 	data.Connection.Connect(true)
-	log.StartLogger.Tracef("xprotocol new active client , connect success %v", data)
+	log.DefaultLogger.Tracef("xprotocol new active client , connect success %v", data)
 
-	log.StartLogger.Tracef("xprotocol new active client , try to create codec client")
+	log.DefaultLogger.Tracef("xprotocol new active client , try to create codec client")
 	codecClient := pool.createCodecClient(context, data)
-	log.StartLogger.Tracef("xprotocol new active client , create codec client success")
+	log.DefaultLogger.Tracef("xprotocol new active client , create codec client success")
 	codecClient.AddConnectionCallbacks(ac)
 	codecClient.SetCodecClientCallbacks(ac)
 	codecClient.SetCodecConnectionCallbacks(ac)
@@ -197,10 +216,10 @@ func newActiveClient(context context.Context, pool *connPool) *activeClient {
 
 	pool.host.HostStats().UpstreamConnectionTotal.Inc(1)
 	pool.host.HostStats().UpstreamConnectionActive.Inc(1)
-	pool.host.HostStats().UpstreamConnectionTotalHttp2.Inc(1)
+	pool.host.HostStats().UpstreamConnectionTotalHTTP2.Inc(1)
 	pool.host.ClusterInfo().Stats().UpstreamConnectionTotal.Inc(1)
 	pool.host.ClusterInfo().Stats().UpstreamConnectionActive.Inc(1)
-	pool.host.ClusterInfo().Stats().UpstreamConnectionTotalHttp2.Inc(1)
+	pool.host.ClusterInfo().Stats().UpstreamConnectionTotalHTTP2.Inc(1)
 
 	codecClient.SetConnectionStats(&types.ConnectionStats{
 		ReadTotal:    pool.host.ClusterInfo().Stats().UpstreamBytesRead,
@@ -212,22 +231,28 @@ func newActiveClient(context context.Context, pool *connPool) *activeClient {
 	return ac
 }
 
+// OnEvent handle connection event
 func (ac *activeClient) OnEvent(event types.ConnectionEvent) {
 	ac.pool.onConnectionEvent(ac, event)
 }
 
+// OnAboveWriteBufferHighWatermark no use
 func (ac *activeClient) OnAboveWriteBufferHighWatermark() {}
 
+// OnBelowWriteBufferLowWatermark no use
 func (ac *activeClient) OnBelowWriteBufferLowWatermark() {}
 
+// OnStreamDestroy destroy stream
 func (ac *activeClient) OnStreamDestroy() {
 	ac.pool.onStreamDestroy(ac)
 }
 
+// OnStreamReset reset stream
 func (ac *activeClient) OnStreamReset(reason types.StreamResetReason) {
 	ac.pool.onStreamReset(ac, reason)
 }
 
+// OnGoAway handle go away event
 func (ac *activeClient) OnGoAway() {
 	ac.pool.onGoAway(ac)
 }

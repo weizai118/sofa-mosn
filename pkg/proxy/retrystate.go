@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package proxy
 
 import (
@@ -21,7 +22,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 type retryState struct {

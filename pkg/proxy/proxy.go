@@ -14,30 +14,43 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package proxy
 
 import (
 	"container/list"
 	"context"
+	"runtime"
 	"sync"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/network/buffer"
-	"github.com/alipay/sofamosn/pkg/router"
-	"github.com/alipay/sofamosn/pkg/stream"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/buffer"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/router"
+	"github.com/alipay/sofa-mosn/pkg/stream"
+	mosnsync "github.com/alipay/sofa-mosn/pkg/sync"
+	"github.com/alipay/sofa-mosn/pkg/types"
+	"github.com/json-iterator/go"
 )
 
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
+
 var (
-	codecHeadersBufPool types.HeadersBufferPool
-	activeStreamPool    types.ObjectBufferPool
-	globalStats         *proxyStats
+	globalStats *proxyStats
+
+	workerPool mosnsync.ShardWorkerPool
 )
 
 func init() {
 	globalStats = newProxyStats(types.GlobalStatsNamespace)
-	codecHeadersBufPool = buffer.NewHeadersBufferPool(1)
-	activeStreamPool = buffer.NewObjectPool(1)
+
+	// default shardsNum is equal to the cpu num
+	shardsNum := runtime.NumCPU()
+	// use 4096 as chan buffer length
+	poolSize := shardsNum * 8096
+
+	workerPool, _ = mosnsync.NewShardWorkerPool(poolSize, shardsNum, eventDispatch)
+	workerPool.Init()
 }
 
 // types.ReadFilter
@@ -49,11 +62,9 @@ type proxy struct {
 	upstreamConnection  types.ClientConnection
 	downstreamCallbacks DownstreamCallbacks
 
-	clusterName    string
-	routers        types.Routers
-	serverCodec    types.ServerStreamConnection
-	resueCodecMaps bool
-	codecPool      types.HeadersBufferPool
+	clusterName string
+	routers     types.Routers
+	serverCodec types.ServerStreamConnection
 
 	context context.Context
 
@@ -71,23 +82,38 @@ type proxy struct {
 	accessLogs []types.AccessLog
 }
 
-func NewProxy(config *v2.Proxy, clusterManager types.ClusterManager, ctx context.Context) Proxy {
-	ctx = context.WithValue(ctx, types.ContextKeyConnectionCodecMapPool, codecHeadersBufPool)
-
+// NewProxy create proxy instance for given v2.Proxy config
+func NewProxy(ctx context.Context, config *v2.Proxy, clusterManager types.ClusterManager) Proxy {
 	proxy := &proxy{
 		config:         config,
 		clusterManager: clusterManager,
 		activeSteams:   list.New(),
 		stats:          globalStats,
-		resueCodecMaps: true,
-		codecPool:      codecHeadersBufPool,
 		context:        ctx,
 		accessLogs:     ctx.Value(types.ContextKeyAccessLogs).([]types.AccessLog),
 	}
 
+	proxy.context = buffer.NewBufferPoolContext(ctx, false)
+
+	extJson, err := json.Marshal(proxy.config.ExtendConfig)
+	if err == nil {
+		log.DefaultLogger.Tracef("proxy extend config = %v", proxy.config.ExtendConfig)
+		var xProxyExtendConfig v2.XProxyExtendConfig
+		json.Unmarshal([]byte(extJson), &xProxyExtendConfig)
+		proxy.context = context.WithValue(proxy.context, types.ContextSubProtocol, xProxyExtendConfig.SubProtocol)
+		log.DefaultLogger.Tracef("proxy extend config subprotocol = %v", xProxyExtendConfig.SubProtocol)
+	} else {
+		log.DefaultLogger.Errorf("get proxy extend config fail = %v", err)
+	}
+
 	listenStatsNamespace := ctx.Value(types.ContextKeyListenerStatsNameSpace).(string)
 	proxy.listenerStats = newListenerStats(listenStatsNamespace)
-	proxy.routers, _ = router.CreateRouteConfig(types.Protocol(config.DownstreamProtocol), config)
+	//log fatal to exit
+	routers, err := router.CreateRouteConfig(types.Protocol(config.DownstreamProtocol), config)
+	if err != nil {
+		log.StartLogger.Fatal(err)
+	}
+	proxy.routers = routers
 	proxy.downstreamCallbacks = &downstreamCallbacks{
 		proxy: proxy,
 	}
@@ -108,10 +134,17 @@ func (p *proxy) onDownstreamEvent(event types.ConnectionEvent) {
 		p.stats.DownstreamConnectionActive().Dec(1)
 		var urEleNext *list.Element
 
+		p.asMux.RLock()
+		downStreams := make([]*downStream, 0, p.activeSteams.Len())
 		for urEle := p.activeSteams.Front(); urEle != nil; urEle = urEleNext {
 			urEleNext = urEle.Next()
 
 			ds := urEle.Value.(*downStream)
+			downStreams = append(downStreams, ds)
+		}
+		p.asMux.RUnlock()
+
+		for _, ds := range downStreams {
 			ds.OnResetStream(types.StreamConnectionTermination)
 		}
 	}
@@ -144,8 +177,8 @@ func (p *proxy) InitializeReadFilterCallbacks(cb types.ReadFilterCallbacks) {
 
 func (p *proxy) OnGoAway() {}
 
-func (p *proxy) NewStream(streamId string, responseSender types.StreamSender) types.StreamReceiver {
-	stream := newActiveStream(streamId, p, responseSender)
+func (p *proxy) NewStream(context context.Context, streamID string, responseSender types.StreamSender) types.StreamReceiver {
+	stream := newActiveStream(context, streamID, p, responseSender)
 
 	if ff := p.context.Value(types.ContextKeyStreamFilterChainFactories); ff != nil {
 		ffs := ff.([]types.StreamFilterChainFactory)
@@ -184,24 +217,11 @@ func (p *proxy) streamResetReasonToResponseFlag(reason types.StreamResetReason) 
 }
 
 func (p *proxy) deleteActiveStream(s *downStream) {
-	// reuse decode map
-	if p.resueCodecMaps {
-		if s.downstreamReqHeaders != nil {
-			//p.codecPool.Give(s.downstreamReqHeaders)
-		}
-
-		if s.upstreamRequest != nil {
-			if s.upstreamRequest.upstreamRespHeaders != nil {
-				//p.codecPool.Give(s.upstreamRequest.upstreamRespHeaders)
-			}
-		}
+	if s.element != nil {
+		p.asMux.Lock()
+		p.activeSteams.Remove(s.element)
+		p.asMux.Unlock()
 	}
-
-	p.asMux.Lock()
-	p.activeSteams.Remove(s.element)
-	p.asMux.Unlock()
-
-	//s.reset()
 }
 
 // ConnectionEventListener

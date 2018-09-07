@@ -14,34 +14,39 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package mosn
 
 import (
 	"net"
-	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"strconv"
 	"sync"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/config"
-	"github.com/alipay/sofamosn/pkg/filter"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/server"
-	"github.com/alipay/sofamosn/pkg/server/config/proxy"
-	"github.com/alipay/sofamosn/pkg/types"
-	"github.com/alipay/sofamosn/pkg/upstream/cluster"
-	"github.com/alipay/sofamosn/pkg/xds"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/config"
+	"github.com/alipay/sofa-mosn/pkg/filter"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/network"
+	"github.com/alipay/sofa-mosn/pkg/protocol"
+	"github.com/alipay/sofa-mosn/pkg/server"
+	"github.com/alipay/sofa-mosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/upstream/cluster"
+	"github.com/alipay/sofa-mosn/pkg/xds"
 )
 
+// Mosn class which wrapper server
 type Mosn struct {
-	servers []server.Server
+	servers        []server.Server
+	clustermanager types.ClusterManager
 }
 
+// NewMosn
+// Create server from mosn config
 func NewMosn(c *config.MOSNConfig) *Mosn {
 	m := &Mosn{}
 	mode := c.Mode()
+
 	if mode == config.Xds {
 		servers := make([]config.ServerConfig, 0, 1)
 		server := config.ServerConfig{
@@ -59,6 +64,7 @@ func NewMosn(c *config.MOSNConfig) *Mosn {
 	}
 
 	srvNum := len(c.Servers)
+
 	if srvNum == 0 {
 		log.StartLogger.Fatalln("no server found")
 	} else if srvNum > 1 {
@@ -67,8 +73,19 @@ func NewMosn(c *config.MOSNConfig) *Mosn {
 	//get inherit fds
 	inheritListeners := getInheritListeners()
 
-	for _, serverConfig := range c.Servers {
+	//cluster manager filter
+	cmf := &clusterManagerFilter{}
 
+	// parse cluster all in one
+	clusters, clusterMap := config.ParseClusterConfig(c.ClusterManager.Clusters)
+	// create cluster manager
+	if mode == config.Xds {
+		m.clustermanager = cluster.NewClusterManager(nil, nil, nil, true, false)
+	} else {
+		m.clustermanager = cluster.NewClusterManager(nil, clusters, clusterMap, c.ClusterManager.AutoDiscovery, c.ClusterManager.RegistryUseHealthCheck)
+	}
+
+	for _, serverConfig := range c.Servers {
 		//1. server config prepare
 		//server config
 		sc := config.ParseServerConfig(&serverConfig)
@@ -78,24 +95,11 @@ func NewMosn(c *config.MOSNConfig) *Mosn {
 
 		var srv server.Server
 		if mode == config.Xds {
-			cmf := &clusterManagerFilter{}
-			cm := cluster.NewClusterManager(nil, nil, nil, true, false)
-			srv = server.NewServer(sc, cmf, cm)
+			srv = server.NewServer(sc, cmf, m.clustermanager)
 
 		} else {
-
-			//cluster manager filter
-			cmf := &clusterManagerFilter{}
-			var clusters []v2.Cluster
-			clusterMap := make(map[string][]v2.Host)
-
-			// parse cluster all in one
-			clusters, clusterMap = config.ParseClusterConfig(c.ClusterManager.Clusters)
-
-			//create cluster manager
-			cm := cluster.NewClusterManager(nil, clusters, clusterMap, c.ClusterManager.AutoDiscovery, c.ClusterManager.RegistryUseHealthCheck)
 			//initialize server instance
-			srv = server.NewServer(sc, cmf, cm)
+			srv = server.NewServer(sc, cmf, m.clustermanager)
 
 			//add listener
 			if serverConfig.Listeners == nil || len(serverConfig.Listeners) == 0 {
@@ -105,19 +109,24 @@ func NewMosn(c *config.MOSNConfig) *Mosn {
 			for _, listenerConfig := range serverConfig.Listeners {
 				// parse ListenerConfig
 				lc := config.ParseListenerConfig(&listenerConfig, inheritListeners)
+				lc.DisableConnIo = listenerDisableIO(&lc.FilterChains[0])
 
+				var nfcf []types.NetworkFilterChainFactory
+				var sfcf []types.StreamFilterChainFactory
+
+				// Note: as we use fasthttp and net/http2.0, the IO we created in mosn should be disabled
 				// network filters
-				if lc.HandOffRestoredDestinationConnections {
-					srv.AddListener(config.ParseListenerConfig(&listenerConfig, inheritListeners), nil, nil)
-					continue
+				if !lc.HandOffRestoredDestinationConnections {
+					// network and stream filters
+					nfcf = getNetworkFilters(&lc.FilterChains[0])
+					sfcf = config.GetStreamFilters(lc.StreamFilters)
 				}
-				nfcf := GetNetworkFilter(&lc.FilterChains[0])
 
-				//stream filters
-				sfcf := getStreamFilters(listenerConfig.StreamFilters)
+				_, err := srv.AddListener(lc, nfcf, sfcf)
+				if err != nil {
+					log.StartLogger.Fatalf("AddListener error:%s", err.Error())
+				}
 
-				config.SetGlobalStreamFilter(sfcf)
-				srv.AddListener(lc, nfcf, sfcf)
 			}
 		}
 		m.servers = append(m.servers, srv)
@@ -132,35 +141,43 @@ func NewMosn(c *config.MOSNConfig) *Mosn {
 			ln.InheritListener.Close()
 		}
 	}
+
+	// set TransferTimeout
+	network.TransferTimeout = server.GracefulTimeout
+	// transfer old mosn connections
+	go network.TransferServer(m.servers[0].Handler())
+
 	return m
 }
 
+// Start mosn's server
 func (m *Mosn) Start() {
 	for _, srv := range m.servers {
 		go srv.Start()
 	}
 }
+
+// Close mosn's server
 func (m *Mosn) Close() {
 	for _, srv := range m.servers {
 		srv.Close()
 	}
+	m.clustermanager.Destory()
 }
 
+// Start mosn project
+// stap1. NewMosn
+// step2. Start Mosn
 func Start(c *config.MOSNConfig, serviceCluster string, serviceNode string) {
 	log.StartLogger.Infof("start by config : %+v", c)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 
-	go func() {
-		// pprof server
-		http.ListenAndServe("0.0.0.0:9090", nil)
-	}()
-
 	Mosn := NewMosn(c)
 	Mosn.Start()
 	////get xds config
-	xdsClient := xds.XdsClient{}
+	xdsClient := xds.Client{}
 	xdsClient.Start(c, serviceCluster, serviceNode)
 	//
 	////todo: daemon running
@@ -168,25 +185,30 @@ func Start(c *config.MOSNConfig, serviceCluster string, serviceNode string) {
 	xdsClient.Stop()
 }
 
-// maybe used in proxy rewrite
-func GetNetworkFilter(c *v2.FilterChain) types.NetworkFilterChainFactory {
-
-	if len(c.Filters) != 1 || c.Filters[0].Name != v2.DEFAULT_NETWORK_FILTER {
-		log.StartLogger.Fatalln("Currently, only Proxy Network Filter Needed!")
-	}
-
-	return &proxy.GenericProxyFilterConfigFactory{
-		Proxy: config.ParseProxyFilterJson(&c.Filters[0]),
-	}
-}
-
-func getStreamFilters(configs []config.FilterConfig) []types.StreamFilterChainFactory {
-	var factories []types.StreamFilterChainFactory
-
-	for _, c := range configs {
-		factories = append(factories, filter.CreateStreamFilterChainFactory(c.Type, c.Config))
+// getNetworkFilter
+// Used to parse proxy from config
+func getNetworkFilters(c *v2.FilterChain) []types.NetworkFilterChainFactory {
+	var factories []types.NetworkFilterChainFactory
+	for _, f := range c.Filters {
+		factory, err := filter.CreateNetworkFilterChainFactory(f.Name, f.Config, false)
+		if err != nil {
+			log.StartLogger.Fatalln("network filter create failed :", err)
+		}
+		factories = append(factories, factory)
 	}
 	return factories
+}
+func listenerDisableIO(c *v2.FilterChain) bool {
+	for _, f := range c.Filters {
+		if f.Name == v2.DEFAULT_NETWORK_FILTER {
+			if downstream, ok := f.Config["downstream_protocol"]; ok {
+				if downstream == string(protocol.HTTP2) || downstream == string(protocol.HTTP1) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 type clusterManagerFilter struct {

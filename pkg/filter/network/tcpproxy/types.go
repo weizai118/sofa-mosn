@@ -14,13 +14,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package tcpproxy
 
 import (
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
-// ReadFilter
+// Proxy
 type Proxy interface {
 	types.ReadFilter
 
@@ -29,21 +30,26 @@ type Proxy interface {
 	ReadDisableDownstream(disable bool)
 }
 
+// ProxyConfig
 type ProxyConfig interface {
 	GetRouteFromEntries(connection types.Connection) string
 }
 
+// UpstreamCallbacks for upstream's callbacks
 type UpstreamCallbacks interface {
 	types.ReadFilter
 	types.ConnectionEventListener
 }
 
+// DownstreamCallbacks for downstream's callbacks
 type DownstreamCallbacks interface {
 	types.ConnectionEventListener
 }
 
+// UpstreamFailureReason used to define Upstream Failure Reason
 type UpstreamFailureReason string
 
+// Upstream Failure Reason const
 const (
 	ConnectFailed         UpstreamFailureReason = "ConnectFailed"
 	NoHealthyUpstream     UpstreamFailureReason = "NoHealthyUpstream"

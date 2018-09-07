@@ -15,20 +15,25 @@
  * limitations under the License.
  */
 //Similar to Network's damage on flow
+
 package faultinject
 
 import (
 	"context"
-
 	"math/rand"
 	"sync/atomic"
 	"time"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/config"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/config"
+	"github.com/alipay/sofa-mosn/pkg/filter"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
+
+func init() {
+	filter.RegisterStream("fault_inject", CreateFaultInjectFilterFactory)
+}
 
 type faultInjectFilter struct {
 	context context.Context
@@ -39,7 +44,7 @@ type faultInjectFilter struct {
 	cb            types.StreamReceiverFilterCallbacks
 }
 
-func NewFaultInjectFilter(context context.Context, config *v2.FaultInject) *faultInjectFilter {
+func NewFaultInjectFilter(context context.Context, config *v2.FaultInject) types.StreamReceiverFilter {
 	return &faultInjectFilter{
 		context:       context,
 		delayPercent:  config.DelayPercent,
@@ -52,9 +57,9 @@ func (f *faultInjectFilter) OnDecodeHeaders(headers map[string]string, endStream
 
 	if atomic.LoadUint32(&f.delaying) > 0 {
 		return types.FilterHeadersStatusStopIteration
-	} else {
-		return types.FilterHeadersStatusContinue
 	}
+
+	return types.FilterHeadersStatusContinue
 }
 
 func (f *faultInjectFilter) OnDecodeData(buf types.IoBuffer, endStream bool) types.FilterDataStatus {
@@ -62,9 +67,9 @@ func (f *faultInjectFilter) OnDecodeData(buf types.IoBuffer, endStream bool) typ
 
 	if atomic.LoadUint32(&f.delaying) > 0 {
 		return types.FilterDataStatusStopIterationAndBuffer
-	} else {
-		return types.FilterDataStatusContinue
 	}
+
+	return types.FilterDataStatusContinue
 }
 
 func (f *faultInjectFilter) OnDecodeTrailers(trailers map[string]string) types.FilterTrailersStatus {
@@ -72,9 +77,9 @@ func (f *faultInjectFilter) OnDecodeTrailers(trailers map[string]string) types.F
 
 	if atomic.LoadUint32(&f.delaying) > 0 {
 		return types.FilterTrailersStatusStopIteration
-	} else {
-		return types.FilterTrailersStatusContinue
 	}
+
+	return types.FilterTrailersStatusContinue
 }
 
 func (f *faultInjectFilter) SetDecoderFilterCallbacks(cb types.StreamReceiverFilterCallbacks) {
@@ -104,30 +109,30 @@ func (f *faultInjectFilter) tryInjectDelay() {
 	}
 }
 
-func (fi *faultInjectFilter) getDelayDuration() uint64 {
-	if fi.delayPercent == 0 {
+func (f *faultInjectFilter) getDelayDuration() uint64 {
+	if f.delayPercent == 0 {
 		return 0
 	}
 
-	if uint32(rand.Intn(100))+1 > fi.delayPercent {
+	if uint32(rand.Intn(100))+1 > f.delayPercent {
 		return 0
 	}
 
-	return fi.delayDuration
+	return f.delayDuration
 }
 
 // ~~ factory
-type FaultInjectFilterConfigFactory struct {
+type FilterConfigFactory struct {
 	FaultInject *v2.FaultInject
 }
 
-func (f *FaultInjectFilterConfigFactory) CreateFilterChain(context context.Context, callbacks types.FilterChainFactoryCallbacks) {
+func (f *FilterConfigFactory) CreateFilterChain(context context.Context, callbacks types.StreamFilterChainFactoryCallbacks) {
 	filter := NewFaultInjectFilter(context, f.FaultInject)
 	callbacks.AddStreamReceiverFilter(filter)
 }
 
 func CreateFaultInjectFilterFactory(conf map[string]interface{}) (types.StreamFilterChainFactory, error) {
-	return &FaultInjectFilterConfigFactory{
+	return &FilterConfigFactory{
 		FaultInject: config.ParseFaultInjectFilter(conf),
 	}, nil
 }

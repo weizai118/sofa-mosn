@@ -14,27 +14,33 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package xprotocol
 
 import (
 	"context"
-	"sync"
-
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/protocol"
-	str "github.com/alipay/sofamosn/pkg/stream"
-	"github.com/alipay/sofamosn/pkg/types"
 	"strconv"
-	"sync/atomic"
 	"strings"
+	"sync"
+	"sync/atomic"
+
+	networkbuffer "github.com/alipay/sofa-mosn/pkg/buffer"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/protocol"
+	str "github.com/alipay/sofa-mosn/pkg/stream"
+	"github.com/alipay/sofa-mosn/pkg/stream/xprotocol/subprotocol"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
+var streamIDXprotocolCount uint64
+
+// StreamDirection 1: server stream 0: client stream
 type StreamDirection int
 
-var streamIdXprotocolCount uint32
-
 const (
+	//ServerStream xprotocol as downstream
 	ServerStream StreamDirection = 1
+	//ClientStream xprotocol as upstream
 	ClientStream StreamDirection = 0
 )
 
@@ -44,16 +50,19 @@ func init() {
 
 type streamConnFactory struct{}
 
+// CreateClientStream upstream create
 func (f *streamConnFactory) CreateClientStream(context context.Context, connection types.ClientConnection,
 	clientCallbacks types.StreamConnectionEventListener, connCallbacks types.ConnectionEventListener) types.ClientStreamConnection {
 	return newStreamConnection(context, connection, clientCallbacks, nil)
 }
 
+// CreateServerStream downstream create
 func (f *streamConnFactory) CreateServerStream(context context.Context, connection types.Connection,
 	serverCallbacks types.ServerStreamConnectionEventListener) types.ServerStreamConnection {
 	return newStreamConnection(context, connection, nil, serverCallbacks)
 }
 
+// CreateBiDirectStream no used
 func (f *streamConnFactory) CreateBiDirectStream(context context.Context, connection types.ClientConnection,
 	clientCallbacks types.StreamConnectionEventListener,
 	serverCallbacks types.ServerStreamConnectionEventListener) types.ClientStreamConnection {
@@ -71,13 +80,18 @@ type streamConnection struct {
 	activeStream    streamMap
 	clientCallbacks types.StreamConnectionEventListener
 	serverCallbacks types.ServerStreamConnectionEventListener
-
-	logger log.Logger
+	codec           types.Multiplexing
+	streamIDMap     sync.Map
+	reqIDMap        sync.Map
+	logger          log.Logger
 }
 
 func newStreamConnection(context context.Context, connection types.Connection, clientCallbacks types.StreamConnectionEventListener,
 	serverCallbacks types.ServerStreamConnectionEventListener) types.ClientStreamConnection {
-
+	subProtocolName := types.SubProtocol(context.Value(types.ContextSubProtocol).(string))
+	log.DefaultLogger.Tracef("xprotocol subprotocol config name = %v", subProtocolName)
+	codec := subprotocol.CreateSubProtocolCodec(context, subProtocolName)
+	log.DefaultLogger.Tracef("xprotocol new stream connection, codec type = %v", subProtocolName)
 	return &streamConnection{
 		context:         context,
 		connection:      connection,
@@ -85,28 +99,90 @@ func newStreamConnection(context context.Context, connection types.Connection, c
 		clientCallbacks: clientCallbacks,
 		serverCallbacks: serverCallbacks,
 		logger:          log.ByContext(context),
+		codec:           codec,
 	}
 }
 
+// Dispatch would invoked in this two situation:
+// serverStreamConnection receive request
+// clientStreamConnection receive response
 // types.StreamConnection
 func (conn *streamConnection) Dispatch(buffer types.IoBuffer) {
-	log.StartLogger.Tracef("stream connection dispatch data = %v", buffer.String())
-	streamId := ""
-	if conn.serverCallbacks != nil {
-		reqId := atomic.AddUint32(&streamIdXprotocolCount, 1)
-		streamId = strconv.FormatUint(uint64(reqId), 10)
+	log.DefaultLogger.Tracef("stream connection dispatch data bytes = %v", buffer.Bytes())
+	log.DefaultLogger.Tracef("stream connection dispatch data string = %v", buffer.String())
+
+	// get sub protocol codec
+	requestList := conn.codec.SplitFrame(buffer.Bytes())
+	for _, request := range requestList {
+		headers := make(map[string]string)
+		// support dynamic route
+		headers[strings.ToLower(protocol.MosnHeaderHostKey)] = conn.connection.RemoteAddr().String()
+		headers[strings.ToLower(protocol.MosnHeaderPathKey)] = "/"
+		log.DefaultLogger.Tracef("before Dispatch on decode header")
+
+		requestLen := len(request)
+		// ProtocolConvertor
+		// convertor first
+		convertorCodec, ok := conn.codec.(types.ProtocolConvertor)
+		if ok {
+			newHeaders, newData := convertorCodec.Convert(request)
+			request = newData
+			headers = newHeaders
+		}
+
+		// get stream id
+		streamID := ""
+		if conn.serverCallbacks != nil {
+			// replace request id
+			reqID := conn.codec.GetStreamID(request)
+			streamID, request = conn.changeStreamID(request)
+
+			conn.reqIDMap.Store(streamID, reqID)
+			if _, ok := headers[types.HeaderStreamID]; !ok {
+				headers[types.HeaderStreamID] = streamID
+			}
+			log.DefaultLogger.Tracef("Xprotocol get streamId %v, old reqID = %v", streamID, reqID)
+
+			// request route
+			requestRouteCodec, ok := conn.codec.(types.RequestRouting)
+			if ok {
+				routeHeaders := requestRouteCodec.GetMetas(request)
+				for k, v := range routeHeaders {
+					headers[k] = v
+				}
+				log.DefaultLogger.Tracef("xprotocol handle request route ,headers = %v", headers)
+			}
+		} else if conn.clientCallbacks != nil {
+			streamID = conn.codec.GetStreamID(request)
+		}
+		// tracing
+		tracingCodec, ok := conn.codec.(types.Tracing)
+		if ok {
+			serviceName := tracingCodec.GetServiceName(request)
+			methodName := tracingCodec.GetMethodName(request)
+			headers[types.HeaderRpcService] = serviceName
+			headers[types.HeaderRpcMethod] = methodName
+			log.DefaultLogger.Tracef("xprotocol handle tracing ,serviceName = %v , methodName = %v", serviceName, methodName)
+		}
+
+		reqBuf := networkbuffer.NewIoBufferBytes(request)
+		conn.OnReceiveHeaders(conn.context, streamID, headers)
+		log.DefaultLogger.Tracef("after Dispatch on decode header")
+		conn.OnReceiveData(conn.context, streamID, reqBuf)
+		log.DefaultLogger.Tracef("after Dispatch on decode data")
+		buffer.Drain(requestLen)
 	}
-	headers := make(map[string]string)
-	// support dynamic route
-	headers[strings.ToLower(protocol.MosnHeaderHostKey)] = conn.connection.RemoteAddr().String()
-	headers[strings.ToLower(protocol.MosnHeaderPathKey)] = "/"
-	log.StartLogger.Tracef("before Dispatch on decode header")
-	conn.OnReceiveHeaders(streamId, headers)
-	log.StartLogger.Tracef("after Dispatch on decode header")
-	conn.OnReceiveData(streamId, buffer)
-	log.StartLogger.Tracef("after Dispatch on decode data")
 }
 
+func (conn *streamConnection) changeStreamID(request []byte) (string, []byte) {
+	nStreamID := atomic.AddUint64(&streamIDXprotocolCount, 1)
+	streamID := strconv.FormatUint(nStreamID, 10)
+	nReq := conn.codec.SetStreamID(request, streamID)
+	streamID = conn.codec.GetStreamID(nReq)
+	return streamID, nReq
+}
+
+// Protocol return xprotocol
 func (conn *streamConnection) Protocol() types.Protocol {
 	return conn.protocol
 }
@@ -123,76 +199,63 @@ func (conn *streamConnection) OnUnderlyingConnectionBelowWriteBufferLowWatermark
 	// todo
 }
 
-func (conn *streamConnection) NewStream(streamId string, responseDecoder types.StreamReceiver) types.StreamSender {
-	log.StartLogger.Tracef("xprotocol stream new stream")
+// NewStream
+func (conn *streamConnection) NewStream(ctx context.Context, streamID string, responseDecoder types.StreamReceiver) types.StreamSender {
+	log.DefaultLogger.Tracef("xprotocol stream new stream,streamId =%v ", streamID)
 	stream := stream{
-		context:    context.WithValue(conn.context, types.ContextKeyStreamId, streamId),
-		streamId:   streamId,
+		context:    context.WithValue(ctx, types.ContextKeyStreamID, streamID),
+		streamID:   streamID,
 		direction:  ClientStream,
 		connection: conn,
 		decoder:    responseDecoder,
 	}
-	conn.activeStream.Set(streamId, stream)
+	conn.activeStream.Set(streamID, stream)
 
 	return &stream
 }
 
-func (conn *streamConnection) OnReceiveHeaders(streamId string, headers map[string]string) types.FilterStatus {
-	log.StartLogger.Tracef("xprotocol stream on decode header")
+// OnReceiveHeaders process header
+func (conn *streamConnection) OnReceiveHeaders(context context.Context, streamID string, headers map[string]string) types.FilterStatus {
+	log.DefaultLogger.Tracef("xprotocol stream on decode header")
 	if conn.serverCallbacks != nil {
-		log.StartLogger.Tracef("xprotocol stream on new stream deteced invoked")
-		conn.onNewStreamDetected(streamId, headers)
+		log.DefaultLogger.Tracef("xprotocol stream on new stream detected invoked")
+		conn.onNewStreamDetected(streamID, headers)
 	}
-	if stream, ok := conn.activeStream.Get(streamId); ok {
-		log.StartLogger.Tracef("before stream decoder invoke on decode header")
-		stream.decoder.OnReceiveHeaders(headers, false)
+	if stream, ok := conn.activeStream.Get(streamID); ok {
+		log.DefaultLogger.Tracef("before stream decoder invoke on decode header")
+		stream.decoder.OnReceiveHeaders(context, headers, false)
 	}
-	log.StartLogger.Tracef("after stream decoder invoke on decode header")
+	log.DefaultLogger.Tracef("after stream decoder invoke on decode header")
 	return types.Continue
 }
 
-func (conn *streamConnection) OnReceiveData(streamId string, data types.IoBuffer) types.FilterStatus {
-	if stream, ok := conn.activeStream.Get(streamId); ok {
-		log.StartLogger.Tracef("xprotocol stream on decode data")
-		stream.decoder.OnReceiveData(data, true)
+// OnReceiveData process data
+func (conn *streamConnection) OnReceiveData(context context.Context, streamID string, data types.IoBuffer) types.FilterStatus {
+	if stream, ok := conn.activeStream.Get(streamID); ok {
+		log.DefaultLogger.Tracef("xprotocol stream on decode data")
+		stream.decoder.OnReceiveData(context, data, true)
 
 		if stream.direction == ClientStream {
 			// for client stream, remove stream on response read
-			stream.connection.activeStream.Remove(stream.streamId)
+			stream.connection.activeStream.Remove(stream.streamID)
 		}
 	}
 	return types.StopIteration
 }
 
-func (conn *streamConnection) OnDecodeTrailer(streamId string, trailers map[string]string) types.FilterStatus {
-	// unsupported
-	return types.StopIteration
-}
-
-// todo, deal with more exception
-func (conn *streamConnection) OnDecodeError(err error, header map[string]string) {
-	if err == nil {
-		return
-	}
-	// for header decode error, close the connection directly
-	if err.Error() == types.UnSupportedProCode {
-		conn.connection.Close(types.NoFlush, types.LocalClose)
-	}
-}
-
-func (conn *streamConnection) onNewStreamDetected(streamId string, headers map[string]string) {
-	if ok := conn.activeStream.Has(streamId); ok {
+func (conn *streamConnection) onNewStreamDetected(streamID string, headers map[string]string) {
+	if ok := conn.activeStream.Has(streamID); ok {
 		return
 	}
 	stream := stream{
-		context:    context.WithValue(conn.context, types.ContextKeyStreamId, streamId),
-		streamId:   streamId,
+		context:    context.WithValue(conn.context, types.ContextKeyStreamID, streamID),
+		streamID:   streamID,
 		direction:  ServerStream,
 		connection: conn,
 	}
 
-	stream.decoder = conn.serverCallbacks.NewStream(streamId, &stream)
-	conn.activeStream.Set(streamId, stream)
+	stream.decoder = conn.serverCallbacks.NewStream(conn.context, streamID, &stream)
+	conn.activeStream.Set(streamID, stream)
 }
 
 // types.Stream
@@ -200,7 +263,7 @@ func (conn *streamConnection) onNewStreamDetected(streamId string, headers map[s
 type stream struct {
 	context context.Context
 
-	streamId         string
+	streamID         string
 	direction        StreamDirection // 0: out, 1: in
 	readDisableCount int
 	connection       *streamConnection
@@ -208,13 +271,16 @@ type stream struct {
 	streamCbs        []types.StreamEventListener
 	encodedHeaders   types.IoBuffer
 	encodedData      types.IoBuffer
+	reqID            string
 }
 
-// ~~ types.Stream
+// AddEventListener add stream event callback
+// types.Stream
 func (s *stream) AddEventListener(cb types.StreamEventListener) {
 	s.streamCbs = append(s.streamCbs, cb)
 }
 
+// RemoveEventListener remove stream event callback
 func (s *stream) RemoveEventListener(cb types.StreamEventListener) {
 	cbIdx := -1
 
@@ -230,40 +296,64 @@ func (s *stream) RemoveEventListener(cb types.StreamEventListener) {
 	}
 }
 
+// ResetStream reset stream
 func (s *stream) ResetStream(reason types.StreamResetReason) {
 	for _, cb := range s.streamCbs {
 		cb.OnResetStream(reason)
 	}
 }
 
+// ReadDisable disable the read loop goroutine on connection
 func (s *stream) ReadDisable(disable bool) {
 	s.connection.connection.SetReadDisable(disable)
 }
 
+// BufferLimit buffer limit
 func (s *stream) BufferLimit() uint32 {
 	return s.connection.connection.BufferLimit()
 }
 
+// AppendHeaders process upstream request header
 // types.StreamEncoder
-func (s *stream) AppendHeaders(headers interface{}, endStream bool) error {
-	log.StartLogger.Tracef("EncodeHeaders,request id = %s, direction = %d", s.streamId, s.direction)
+func (s *stream) AppendHeaders(context context.Context, headers interface{}, endStream bool) error {
+	log.DefaultLogger.Tracef("EncodeHeaders,request id = %s, direction = %d", s.streamID, s.direction)
 	if endStream {
 		s.endStream()
 	}
 	return nil
 }
 
-func (s *stream) AppendData(data types.IoBuffer, endStream bool) error {
-	s.encodedData = data
-	log.StartLogger.Tracef("EncodeData,request id = %s, direction = %d,data = %v", s.streamId, s.direction, data.String())
+// AppendData process upstream request data
+func (s *stream) AppendData(context context.Context, data types.IoBuffer, endStream bool) error {
+	if s.direction == ClientStream {
+		s.encodedData = data
+	} else if s.direction == ServerStream {
+		streamID := s.streamID
+		value, ok := s.connection.reqIDMap.Load(streamID)
+		log.DefaultLogger.Tracef("server stream append data , get streamId = %v ", streamID)
+		if ok {
+			// restore request id
+			reqID := value.(string)
+			buf := data.Bytes()
+			buf = s.connection.codec.SetStreamID(buf, reqID)
+			reqBuf := networkbuffer.NewIoBufferBytes(buf)
+			s.encodedData = reqBuf
+			s.connection.reqIDMap.Delete(streamID)
+			log.DefaultLogger.Tracef("server stream append data , restore reqID = %v ,old id = %v", reqID, streamID)
+		} else {
+			log.DefaultLogger.Tracef("server stream append data fail to get map req id , old id = %v", streamID)
+		}
+	}
+	log.DefaultLogger.Tracef("EncodeData,request id = %s, direction = %d,data = %v", s.streamID, s.direction, data.String())
 	if endStream {
 		s.endStream()
 	}
 	return nil
 }
 
-func (s *stream) AppendTrailers(trailers map[string]string) error {
-	log.StartLogger.Tracef("EncodeTrailers,request id = %s, direction = %d", s.streamId, s.direction)
+// AppendTrailers process upstream request trailers
+func (s *stream) AppendTrailers(context context.Context, trailers map[string]string) error {
+	log.DefaultLogger.Tracef("EncodeTrailers,request id = %s, direction = %d", s.streamID, s.direction)
 	s.endStream()
 	return nil
 }
@@ -272,23 +362,24 @@ func (s *stream) AppendTrailers(trailers map[string]string) error {
 // For server stream, write out response
 // For client stream, write out request
 
-//TODO: x-protocol stream has encodeHeaders?
+//TODO: x-subprotocol stream has encodeHeaders?
 func (s *stream) endStream() {
-	log.StartLogger.Tracef("xprotocol stream end stream invoked , request id = %s, direction = %d", s.streamId, s.direction)
-	if stream, ok := s.connection.activeStream.Get(s.streamId); ok {
-		log.StartLogger.Tracef("xprotocol stream end stream write encodedata")
+	log.DefaultLogger.Tracef("xprotocol stream end stream invoked , request id = %s, direction = %d", s.streamID, s.direction)
+	if stream, ok := s.connection.activeStream.Get(s.streamID); ok {
+		log.DefaultLogger.Tracef("xprotocol stream end stream write encodedata = %v", s.encodedData)
 		stream.connection.connection.Write(s.encodedData)
 	} else {
-		s.connection.logger.Errorf("No stream %s to end", s.streamId)
+		s.connection.logger.Errorf("No stream %s to end", s.streamID)
 	}
 
 	if s.direction == ServerStream {
 		// for a server stream, remove stream on response wrote
-		s.connection.activeStream.Remove(s.streamId)
-		log.StartLogger.Warnf("Remove Request ID = %+v", s.streamId)
+		s.connection.activeStream.Remove(s.streamID)
+		log.DefaultLogger.Tracef("Remove Request ID = %+v", s.streamID)
 	}
 }
 
+// GetStream return stream
 func (s *stream) GetStream() types.Stream {
 	return s
 }
@@ -299,45 +390,49 @@ type streamMap struct {
 }
 
 func newStreamMap(context context.Context) streamMap {
-	smap := make(map[string]interface{}, 5096)
+	smap := make(map[string]interface{}, 32)
 
 	return streamMap{
 		smap: smap,
 	}
 }
 
-func (m *streamMap) Has(streamId string) bool {
+// Has check stream id
+func (m *streamMap) Has(streamID string) bool {
 	m.mux.RLock()
 	defer m.mux.RUnlock()
 
-	if _, ok := m.smap[streamId]; ok {
+	if _, ok := m.smap[streamID]; ok {
 		return true
-	} else {
-		return false
 	}
+
+	return false
 }
 
-func (m *streamMap) Get(streamId string) (stream, bool) {
+// Get return stream
+func (m *streamMap) Get(streamID string) (stream, bool) {
 	m.mux.RLock()
 	defer m.mux.RUnlock()
 
-	if s, ok := m.smap[streamId]; ok {
+	if s, ok := m.smap[streamID]; ok {
 		return s.(stream), ok
-	} else {
-		return stream{}, false
 	}
+
+	return stream{}, false
 }
 
-func (m *streamMap) Remove(streamId string) {
+// Remove delete stream
+func (m *streamMap) Remove(streamID string) {
 	m.mux.Lock()
 	defer m.mux.Unlock()
 
-	delete(m.smap, streamId)
+	delete(m.smap, streamID)
 }
 
-func (m *streamMap) Set(streamId string, s stream) {
+// Set add stream
+func (m *streamMap) Set(streamID string, s stream) {
 	m.mux.Lock()
 	defer m.mux.Unlock()
 
-	m.smap[streamId] = s
+	m.smap[streamID] = s
 }

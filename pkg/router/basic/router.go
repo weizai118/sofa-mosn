@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package basic
 
 import (
@@ -21,18 +22,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	_ "github.com/alipay/sofamosn/pkg/protocol"
-	"github.com/alipay/sofamosn/pkg/router"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/router"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 func init() {
-	//router.RegisteRouterConfigFactory(protocol.SofaRpc, NewRouters)
-	//router.RegisteRouterConfigFactory(protocol.Http2, NewRouters)
-	//router.RegisteRouterConfigFactory(protocol.Http1, NewRouters)
-	//router.RegisteRouterConfigFactory(protocol.Xprotocol, NewRouters)
+	//router.RegisterRouterConfigFactory(protocol.SofaRpc, NewRouters)
+	//router.RegisterRouterConfigFactory(protocol.Http2, NewRouters)
+	//router.RegisterRouterConfigFactory(protocol.Http1, NewRouters)
+	//router.RegisterRouterConfigFactory(protocol.Xprotocol, NewRouters)
 }
 
 // types.Routers
@@ -107,7 +107,7 @@ func (rc *Routers) DelRouter(routerName string) {
 
 // types.Route
 // types.RouteRule
-// router.Matchable
+// router.matchable
 type basicRouter struct {
 	RouteRuleImplAdaptor
 	name          string
@@ -155,9 +155,9 @@ func NewRouters(config interface{}) (types.Routers, error) {
 		//router.RoutersManager.AddRoutersSet(rc)
 		return rc, nil
 
-	} else {
-		return nil, errors.New("invalid config struct")
 	}
+
+	return nil, errors.New("invalid config struct")
 }
 
 func (srr *basicRouter) Match(headers map[string]string, randomValue uint64) types.Route {
@@ -176,10 +176,9 @@ func (srr *basicRouter) Match(headers map[string]string, randomValue uint64) typ
 
 	if srr.service == service {
 		return srr
-	} else {
-		return nil
 	}
-	return srr
+
+	return nil
 }
 
 func (srr *basicRouter) RedirectRule() types.RedirectRule {

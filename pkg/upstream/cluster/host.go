@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package cluster
 
 import (
@@ -22,11 +23,11 @@ import (
 	"net"
 	"sync"
 
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/network"
+	"github.com/alipay/sofa-mosn/pkg/types"
 	"github.com/rcrowley/go-metrics"
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/network"
-	"github.com/alipay/sofamosn/pkg/types"
 )
 
 type hostSet struct {
@@ -43,7 +44,7 @@ type hostSet struct {
 func (hs *hostSet) Hosts() []types.Host {
 	hs.mux.RLock()
 	defer hs.mux.RUnlock()
-	
+
 	return hs.hosts
 }
 
@@ -70,7 +71,7 @@ func (hs *hostSet) HealthHostsPerLocality() [][]types.Host {
 
 func (hs *hostSet) UpdateHosts(hosts []types.Host, healthyHosts []types.Host, hostsPerLocality [][]types.Host,
 	healthyHostsPerLocality [][]types.Host, hostsAdded []types.Host, hostsRemoved []types.Host) {
-	
+
 	// todo change mutex
 	// modified because in updateCb(), there is lock condition
 	hs.mux.Lock()
@@ -102,6 +103,7 @@ type host struct {
 	healthFlags uint64
 }
 
+// NewHost used to create types.Host
 func NewHost(config v2.Host, clusterInfo types.ClusterInfo) types.Host {
 	addr, _ := net.ResolveTCPAddr("tcp", config.Address)
 
@@ -119,9 +121,9 @@ func newHostStats(config v2.Host) types.HostStats {
 		UpstreamConnectionTotal:                        metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_total"), nil),
 		UpstreamConnectionClose:                        metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_close"), nil),
 		UpstreamConnectionActive:                       metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_active"), nil),
-		UpstreamConnectionTotalHttp1:                   metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_total_http1"), nil),
-		UpstreamConnectionTotalHttp2:                   metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_total_http2"), nil),
-		UpstreamConnectionTotalSofaRpc:                 metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_total_sofarpc"), nil),
+		UpstreamConnectionTotalHTTP1:                   metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_total_http1"), nil),
+		UpstreamConnectionTotalHTTP2:                   metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_total_http2"), nil),
+		UpstreamConnectionTotalSofaRPC:                 metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_total_sofarpc"), nil),
 		UpstreamConnectionConFail:                      metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_con_fail"), nil),
 		UpstreamConnectionLocalClose:                   metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_local_close"), nil),
 		UpstreamConnectionRemoteClose:                  metrics.GetOrRegisterCounter(fmt.Sprintf("%s.%s", nameSpace, "upstream_connection_remote_close"), nil),
@@ -140,8 +142,12 @@ func newHostStats(config v2.Host) types.HostStats {
 
 func (h *host) CreateConnection(context context.Context) types.CreateConnectionData {
 	logger := log.ByContext(context)
+	var tlsMng types.TLSContextManager
+	if !h.tlsDisable {
+		tlsMng = h.clusterInfo.TLSMng()
+	}
 
-	clientConn := network.NewClientConnection(h.clusterInfo.SourceAddress(), h.clusterInfo.TLSMng(), h.address, nil, logger)
+	clientConn := network.NewClientConnection(h.clusterInfo.SourceAddress(), tlsMng, h.address, nil, logger)
 	clientConn.SetBufferLimit(h.clusterInfo.ConnBufferLimitBytes())
 
 	return types.CreateConnectionData{
@@ -211,6 +217,7 @@ type hostInfo struct {
 	clusterInfo   types.ClusterInfo
 	stats         types.HostStats
 	metaData      types.RouteMetaData
+	tlsDisable    bool
 
 	// TODO: locality, outlier, healthchecker
 }
@@ -223,6 +230,7 @@ func newHostInfo(addr net.Addr, config v2.Host, clusterInfo types.ClusterInfo) h
 		clusterInfo:   clusterInfo,
 		stats:         newHostStats(config),
 		metaData:      GenerateHostMetadata(config.MetaData),
+		tlsDisable:    config.TLSDisable,
 	}
 }
 
@@ -262,13 +270,14 @@ func (hi *hostInfo) HostStats() types.HostStats {
 	return hi.stats
 }
 
+// GenerateHostMetadata
+// generate host's metadata in map[string]types.HashedValue type
 func GenerateHostMetadata(metadata v2.Metadata) types.RouteMetaData {
 	rm := make(map[string]types.HashedValue, 1)
 
 	for k, v := range metadata {
-		if vs, ok := v.(string); ok {
-			rm[k] = types.GenerateHashedValue(vs)
-		}
+		rm[k] = types.GenerateHashedValue(v)
+
 	}
 
 	return rm

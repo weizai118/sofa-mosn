@@ -14,42 +14,46 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package handler
 
 import (
 	"context"
 	"errors"
 
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/protocol/sofarpc"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/protocol/sofarpc"
 )
 
-type BoltCommandHandler struct {
+type boltCommandHandler struct {
 	processors map[int16]sofarpc.RemotingProcessor
 }
 
-func NewBoltCommandHandler() *BoltCommandHandler {
-	return &BoltCommandHandler{
+// NewBoltCommandHandler
+// new bolt command handler
+func NewBoltCommandHandler() sofarpc.CommandHandler {
+	return &boltCommandHandler{
 		processors: map[int16]sofarpc.RemotingProcessor{
 			sofarpc.RPC_REQUEST:  &BoltRequestProcessor{},
 			sofarpc.RPC_RESPONSE: &BoltResponseProcessor{},
-			sofarpc.HEARTBEAT:    &BoltHbProcessor{},
+			sofarpc.HEARTBEAT:    &boltHbProcessor{},
 		},
 	}
 }
 
-//Add BOLTV2's Command Handler
-func NewBoltCommandHandlerV2() *BoltCommandHandler {
-	return &BoltCommandHandler{
+// NewBoltCommandHandlerV2
+// Add BOLTV2's Command Handler
+func NewBoltCommandHandlerV2() sofarpc.CommandHandler {
+	return &boltCommandHandler{
 		processors: map[int16]sofarpc.RemotingProcessor{
 			sofarpc.RPC_REQUEST:  &BoltRequestProcessorV2{},
 			sofarpc.RPC_RESPONSE: &BoltResponseProcessorV2{},
-			sofarpc.HEARTBEAT:    &BoltHbProcessor{},
+			sofarpc.HEARTBEAT:    &boltHbProcessor{},
 		},
 	}
 }
 
-func (h *BoltCommandHandler) HandleCommand(context context.Context, msg interface{}, filter interface{}) error {
+func (h *boltCommandHandler) HandleCommand(context context.Context, msg interface{}, filter interface{}) error {
 	logger := log.ByContext(context)
 
 	if cmd, ok := msg.(sofarpc.ProtoBasicCmd); ok {
@@ -72,9 +76,9 @@ func (h *BoltCommandHandler) HandleCommand(context context.Context, msg interfac
 	return nil
 }
 
-func (h *BoltCommandHandler) RegisterProcessor(cmdCode int16, processor *sofarpc.RemotingProcessor) {
+func (h *boltCommandHandler) RegisterProcessor(cmdCode int16, processor *sofarpc.RemotingProcessor) {
 	if _, exists := h.processors[cmdCode]; exists {
-		log.DefaultLogger.Warnf("bolt cmd handler [%x] alreay exist:", cmdCode)
+		log.DefaultLogger.Warnf("bolt cmd handler [%x] already exist:", cmdCode)
 	} else {
 		h.processors[cmdCode] = *processor
 	}

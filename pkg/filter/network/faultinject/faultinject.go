@@ -14,17 +14,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package faultinject
 
 import (
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/types"
 	"math/rand"
 	"sync/atomic"
 	"time"
+
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
-type faultinjecter struct {
+type faultInjector struct {
 	// 1~100
 	delayPercent  uint32
 	delayDuration uint64
@@ -32,32 +34,33 @@ type faultinjecter struct {
 	readCallbacks types.ReadFilterCallbacks
 }
 
-func NewFaultInjecter(config *v2.FaultInject) FaultInjecter {
-	return &faultinjecter{
+// NewFaultInjector makes a fault injector as types.ReadFilter
+func NewFaultInjector(config *v2.FaultInject) types.ReadFilter {
+	return &faultInjector{
 		delayPercent:  config.DelayPercent,
 		delayDuration: config.DelayDuration,
 	}
 }
 
-func (fi *faultinjecter) OnData(buffer types.IoBuffer) types.FilterStatus {
+func (fi *faultInjector) OnData(buffer types.IoBuffer) types.FilterStatus {
 	fi.tryInjectDelay()
 
 	if atomic.LoadUint32(&fi.delaying) > 0 {
 		return types.StopIteration
-	} else {
-		return types.Continue
 	}
-}
 
-func (fi *faultinjecter) OnNewConnection() types.FilterStatus {
 	return types.Continue
 }
 
-func (fi *faultinjecter) InitializeReadFilterCallbacks(cb types.ReadFilterCallbacks) {
+func (fi *faultInjector) OnNewConnection() types.FilterStatus {
+	return types.Continue
+}
+
+func (fi *faultInjector) InitializeReadFilterCallbacks(cb types.ReadFilterCallbacks) {
 	fi.readCallbacks = cb
 }
 
-func (fi *faultinjecter) tryInjectDelay() {
+func (fi *faultInjector) tryInjectDelay() {
 	if atomic.LoadUint32(&fi.delaying) > 0 {
 		return
 	}
@@ -77,7 +80,7 @@ func (fi *faultinjecter) tryInjectDelay() {
 	}
 }
 
-func (fi *faultinjecter) getDelayDuration() uint64 {
+func (fi *faultInjector) getDelayDuration() uint64 {
 	if fi.delayPercent == 0 {
 		return 0
 	}

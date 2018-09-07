@@ -14,19 +14,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package proxy
 
 import (
 	"strconv"
 	"time"
 
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 var bitSize64 = 1 << 6
 
-func parseProxyTimeout(route types.Route, headers map[string]string) *ProxyTimeout {
-	timeout := &ProxyTimeout{}
+func parseProxyTimeout(route types.Route, headers map[string]string) *Timeout {
+	timeout := &Timeout{}
 	timeout.GlobalTimeout = route.RouteRule().GlobalTimeout()
 	timeout.TryTimeout = route.RouteRule().Policy().RetryPolicy().TryTimeout()
 

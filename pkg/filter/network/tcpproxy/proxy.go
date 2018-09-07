@@ -14,15 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package tcpproxy
 
 import (
 	"context"
-	"github.com/alipay/sofamosn/pkg/api/v2"
-	"github.com/alipay/sofamosn/pkg/log"
-	"github.com/alipay/sofamosn/pkg/network"
-	"github.com/alipay/sofamosn/pkg/types"
 	"reflect"
+
+	"github.com/alipay/sofa-mosn/pkg/api/v2"
+	"github.com/alipay/sofa-mosn/pkg/log"
+	"github.com/alipay/sofa-mosn/pkg/network"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 // ReadFilter
@@ -40,7 +42,7 @@ type proxy struct {
 	accessLogs []types.AccessLog
 }
 
-func NewProxy(config *v2.TcpProxy, clusterManager types.ClusterManager, ctx context.Context) Proxy {
+func NewProxy(ctx context.Context, config *v2.TCPProxy, clusterManager types.ClusterManager) Proxy {
 	p := &proxy{
 		config:         NewProxyConfig(config),
 		clusterManager: clusterManager,
@@ -62,8 +64,8 @@ func (p *proxy) OnData(buffer types.IoBuffer) types.FilterStatus {
 	bytesRecved := p.requestInfo.BytesReceived() + uint64(buffer.Len())
 	p.requestInfo.SetBytesReceived(bytesRecved)
 
-	p.upstreamConnection.Write(buffer)
-
+	p.upstreamConnection.Write(buffer.Clone())
+	buffer.Drain(buffer.Len())
 	return types.StopIteration
 }
 
@@ -105,7 +107,7 @@ func (p *proxy) initializeUpstreamConnection() types.FilterStatus {
 		return types.StopIteration
 	}
 
-	connectionData := p.clusterManager.TcpConnForCluster(clusterName, nil)
+	connectionData := p.clusterManager.TCPConnForCluster(nil, clusterName)
 
 	if connectionData.Connection == nil {
 		p.requestInfo.SetResponseFlag(types.NoHealthyUpstream)
@@ -151,7 +153,8 @@ func (p *proxy) onUpstreamData(buffer types.IoBuffer) {
 	bytesSent := p.requestInfo.BytesSent() + uint64(buffer.Len())
 	p.requestInfo.SetBytesSent(bytesSent)
 
-	p.readCallbacks.Connection().Write(buffer)
+	p.readCallbacks.Connection().Write(buffer.Clone())
+	buffer.Drain(buffer.Len())
 }
 
 func (p *proxy) onUpstreamEvent(event types.ConnectionEvent) {
@@ -184,7 +187,7 @@ func (p *proxy) finalizeUpstreamConnectionStats() {
 }
 
 func (p *proxy) onConnectionSuccess() {
-	log.DefaultLogger.Debugf("new upstream connection %d created", p.upstreamConnection.Id())
+	log.DefaultLogger.Debugf("new upstream connection %d created", p.upstreamConnection.ID())
 }
 
 func (p *proxy) onDownstreamEvent(event types.ConnectionEvent) {
@@ -221,7 +224,7 @@ type route struct {
 	clusterName      string
 }
 
-func NewProxyConfig(config *v2.TcpProxy) ProxyConfig {
+func NewProxyConfig(config *v2.TCPProxy) ProxyConfig {
 	var routes []*route
 
 	for _, routeConfig := range config.Routes {
@@ -273,7 +276,6 @@ func (uc *upstreamCallbacks) OnEvent(event types.ConnectionEvent) {
 
 func (uc *upstreamCallbacks) OnData(buffer types.IoBuffer) types.FilterStatus {
 	uc.proxy.onUpstreamData(buffer)
-
 	return types.StopIteration
 }
 

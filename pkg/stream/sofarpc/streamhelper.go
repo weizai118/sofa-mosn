@@ -14,27 +14,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package sofarpc
 
 import (
-	"reflect"
 	"strconv"
 
-	"github.com/alipay/sofamosn/pkg/protocol/sofarpc"
-	"github.com/alipay/sofamosn/pkg/types"
+	"github.com/alipay/sofa-mosn/pkg/protocol/sofarpc"
+	"github.com/alipay/sofa-mosn/pkg/types"
 )
 
 func (s *stream) encodeSterilize(headers interface{}) interface{} {
 	if headerMaps, ok := headers.(map[string]string); ok {
 		if s.direction == ServerStream {
-			headerMaps[sofarpc.SofaPropertyHeader(sofarpc.HeaderReqID)] = s.requestId
+			headerMaps[sofarpc.SofaPropertyHeader(sofarpc.HeaderReqID)] = s.requestID
 		}
 
 		// remove proxy header before codec encode
 		delete(headerMaps, types.HeaderStreamID)
 		delete(headerMaps, types.HeaderGlobalTimeout)
 		delete(headerMaps, types.HeaderTryTimeout)
-		
+
 		delete(headerMaps, types.HeaderStremEnd)
 
 		if status, ok := headerMaps[types.HeaderStatus]; ok {
@@ -69,7 +69,7 @@ func (s *stream) encodeSterilize(headers interface{}) interface{} {
 					s.connection.logger.Errorf(err.Error())
 				}
 			}
-		} else{
+		} else {
 			headers = headerMaps
 		}
 	}
@@ -79,24 +79,23 @@ func (s *stream) encodeSterilize(headers interface{}) interface{} {
 
 //added by @boqin: return value represents whether the request is HearBeat or not
 //if request is heartbeat msg, then it only has request header, so return true as endStream
-func decodeSterilize(streamId string, headers map[string]string) bool {
-	headers[types.HeaderStreamID] = streamId
+func decodeSterilize(streamID string, headers map[string]string) bool {
+	headers[types.HeaderStreamID] = streamID
 
 	if v, ok := headers[sofarpc.SofaPropertyHeader(sofarpc.HeaderTimeout)]; ok {
 		headers[types.HeaderTryTimeout] = v
 	}
 
 	if cmdCodeStr, ok := headers[sofarpc.SofaPropertyHeader(sofarpc.HeaderCmdCode)]; ok {
-		cmdCode := sofarpc.ConvertPropertyValue(cmdCodeStr, reflect.Int16)
+		cmdCode := sofarpc.ConvertPropertyValueInt16(cmdCodeStr)
 		if cmdCode == sofarpc.HEARTBEAT {
 			return true
 		}
 	}
-	
-	
-	if _, ok :=headers[types.HeaderStremEnd];ok {
+
+	if _, ok := headers[types.HeaderStremEnd]; ok {
 		return true
 	}
-	
+
 	return false
 }

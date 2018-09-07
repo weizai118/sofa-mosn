@@ -14,14 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package sofarpc
 
 import (
-	"context"
 	"reflect"
 	"strconv"
-
-	"github.com/alipay/sofamosn/pkg/types"
 )
 
 func SofaPropertyHeader(name string) string {
@@ -35,11 +33,11 @@ func GetPropertyValue(properHeaders map[string]reflect.Kind, headers map[string]
 		delete(headers, propertyHeaderName)
 
 		return ConvertPropertyValue(value, properHeaders[name])
-	} else {
-		if value, ok := headers[name]; ok {
+	}
 
-			return ConvertPropertyValue(value, properHeaders[name])
-		}
+	if value, ok := headers[name]; ok {
+
+		return ConvertPropertyValue(value, properHeaders[name])
 	}
 
 	return nil
@@ -51,7 +49,7 @@ func ConvertPropertyValue(strValue string, kind reflect.Kind) interface{} {
 		value, _ := strconv.ParseUint(strValue, 10, 8)
 		return byte(value)
 	case reflect.Uint16:
-		value, _ := strconv.ParseUint(strValue, 10, 8)
+		value, _ := strconv.ParseUint(strValue, 10, 16)
 		return uint16(value)
 	case reflect.Uint32:
 		value, _ := strconv.ParseUint(strValue, 10, 32)
@@ -77,18 +75,12 @@ func ConvertPropertyValue(strValue string, kind reflect.Kind) interface{} {
 }
 
 func IsSofaRequest(headers map[string]string) bool {
-	procode := ConvertPropertyValue(headers[SofaPropertyHeader(HeaderProtocolCode)], reflect.Uint8)
+	procode := ConvertPropertyValueUint8(headers[SofaPropertyHeader(HeaderProtocolCode)])
 
 	if procode == PROTOCOL_CODE_V1 || procode == PROTOCOL_CODE_V2 {
-		cmdtype := ConvertPropertyValue(headers[SofaPropertyHeader(HeaderCmdType)], reflect.Uint8)
+		cmdtype := ConvertPropertyValueUint8(headers[SofaPropertyHeader(HeaderCmdType)])
 
 		if cmdtype == REQUEST {
-			return true
-		}
-	} else if procode == PROTOCOL_CODE_TR {
-		requestFlage := ConvertPropertyValue(headers[SofaPropertyHeader(HeaderReqFlag)], reflect.Uint8)
-
-		if requestFlage == HEADER_REQUEST {
 			return true
 		}
 	}
@@ -96,24 +88,59 @@ func IsSofaRequest(headers map[string]string) bool {
 	return false
 }
 
-func GetMap(context context.Context, defaultSize int) map[string]string {
-	var amap map[string]string
+func GetPropertyValue1(properHeaders map[string]reflect.Kind, headers map[string]string, name string) string {
+	propertyHeaderName := SofaPropertyHeader(name)
 
-	if context != nil && context.Value(types.ContextKeyConnectionCodecMapPool) != nil {
-		pool := context.Value(types.ContextKeyConnectionCodecMapPool).(types.HeadersBufferPool)
-		amap = pool.Take(defaultSize)
+	if value, ok := headers[propertyHeaderName]; ok {
+		delete(headers, propertyHeaderName)
+
+		return value
 	}
 
-	if amap == nil {
-		amap = make(map[string]string, defaultSize)
+	if value, ok := headers[name]; ok {
+
+		return value
 	}
 
-	return amap
+	return ""
 }
 
-func ReleaseMap(context context.Context, amap map[string]string) {
-	if context != nil && context.Value(types.ContextKeyConnectionCodecMapPool) != nil {
-		pool := context.Value(types.ContextKeyConnectionCodecMapPool).(types.HeadersBufferPool)
-		pool.Give(amap)
-	}
+func ConvertPropertyValueUint8(strValue string) byte {
+	value, _ := strconv.ParseUint(strValue, 10, 8)
+	return byte(value)
+}
+
+func ConvertPropertyValueUint16(strValue string) uint16 {
+	value, _ := strconv.ParseUint(strValue, 10, 16)
+	return uint16(value)
+}
+
+func ConvertPropertyValueUint32(strValue string) uint32 {
+	value, _ := strconv.ParseUint(strValue, 10, 32)
+	return uint32(value)
+}
+
+func ConvertPropertyValueUint64(strValue string) uint64 {
+	value, _ := strconv.ParseUint(strValue, 10, 64)
+	return uint64(value)
+}
+
+func ConvertPropertyValueInt8(strValue string) int8 {
+	value, _ := strconv.ParseInt(strValue, 10, 8)
+	return int8(value)
+}
+
+func ConvertPropertyValueInt16(strValue string) int16 {
+	value, _ := strconv.ParseInt(strValue, 10, 16)
+	return int16(value)
+}
+
+func ConvertPropertyValueInt(strValue string) int {
+	value, _ := strconv.ParseInt(strValue, 10, 32)
+	return int(value)
+}
+
+func ConvertPropertyValueInt64(strValue string) int64 {
+	value, _ := strconv.ParseInt(strValue, 10, 64)
+	return int64(value)
 }

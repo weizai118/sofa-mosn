@@ -14,22 +14,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package v2
 
 import (
 	"errors"
 	"fmt"
+	"math/rand"
+	"time"
+
+	"github.com/alipay/sofa-mosn/pkg/log"
 	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	"github.com/envoyproxy/go-control-plane/envoy/api/v2/core"
 	bootstrap "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v2"
 	ads "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v2"
-	"github.com/alipay/sofamosn/pkg/log"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
-	"math/rand"
-	"time"
 )
 
+//  Init parsed ds and clusters config for xds
 func (c *XDSConfig) Init(dynamicResources *bootstrap.Bootstrap_DynamicResources, staticResources *bootstrap.Bootstrap_StaticResources) error {
 	err := c.loadClusters(staticResources)
 	if err != nil {
@@ -53,7 +56,7 @@ func (c *XDSConfig) loadADSConfig(dynamicResources *bootstrap.Bootstrap_DynamicR
 		log.DefaultLogger.Errorf("Invalid DynamicResources")
 		return err
 	}
-	config, err := c.getApiSourceEndpoint(dynamicResources.AdsConfig)
+	config, err := c.getAPISourceEndpoint(dynamicResources.AdsConfig)
 	if err != nil {
 		log.DefaultLogger.Errorf("fail to get api source endpoint")
 		return err
@@ -62,14 +65,14 @@ func (c *XDSConfig) loadADSConfig(dynamicResources *bootstrap.Bootstrap_DynamicR
 	return nil
 }
 
-func (c *XDSConfig) getApiSourceEndpoint(source *core.ApiConfigSource) (*ADSConfig, error) {
+func (c *XDSConfig) getAPISourceEndpoint(source *core.ApiConfigSource) (*ADSConfig, error) {
 	config := &ADSConfig{}
 	if source.ApiType != core.ApiConfigSource_GRPC {
-		log.DefaultLogger.Errorf("unsupport api type: %v", source.ApiType)
+		log.DefaultLogger.Errorf("unsupported api type: %v", source.ApiType)
 		err := errors.New("only support GRPC api type yet")
 		return nil, err
 	}
-	config.ApiType = source.ApiType
+	config.APIType = source.ApiType
 	if source.RefreshDelay == nil || source.RefreshDelay.Nanoseconds() <= 0 {
 		duration := time.Duration(time.Second * 10) // default refresh delay
 		config.RefreshDelay = &duration
@@ -86,7 +89,7 @@ func (c *XDSConfig) getApiSourceEndpoint(source *core.ApiConfigSource) (*ADSConf
 				duration := time.Duration(time.Second) // default connection timeout
 				serviceConfig.Timeout = &duration
 			} else {
-				var nanos int64 = service.Timeout.Seconds*int64(time.Second) + int64(service.Timeout.Nanos)
+				var nanos = service.Timeout.Seconds*int64(time.Second) + int64(service.Timeout.Nanos)
 				duration := time.Duration(nanos)
 				serviceConfig.Timeout = &duration
 			}
@@ -94,8 +97,7 @@ func (c *XDSConfig) getApiSourceEndpoint(source *core.ApiConfigSource) (*ADSConf
 			serviceConfig.ClusterConfig = c.Clusters[clusterName]
 			if serviceConfig.ClusterConfig == nil {
 				log.DefaultLogger.Errorf("cluster not found: %s", clusterName)
-				err := errors.New(fmt.Sprintf("cluster not found: %s", clusterName))
-				return nil, err
+				return nil, fmt.Errorf("cluster not found: %s", clusterName)
 			}
 			config.Services = append(config.Services, &serviceConfig)
 		} else if _, ok := t.(*core.GrpcService_GoogleGrpc_); ok {
@@ -151,6 +153,7 @@ func (c *XDSConfig) loadClusters(staticResources *bootstrap.Bootstrap_StaticReso
 	return nil
 }
 
+// GetEndpoint return an endpoint address by random
 func (c *ClusterConfig) GetEndpoint() (string, *time.Duration) {
 	if c.LbPolicy != xdsapi.Cluster_RANDOM || len(c.Address) < 1 {
 		// never happen
@@ -162,6 +165,7 @@ func (c *ClusterConfig) GetEndpoint() (string, *time.Duration) {
 	return c.Address[idx], c.ConnectTimeout
 }
 
+// GetStreamClient return a grpc stream client that connected to ads
 func (c *ADSConfig) GetStreamClient() ads.AggregatedDiscoveryService_StreamAggregatedResourcesClient {
 	if c.StreamClient != nil && c.StreamClient.Client != nil {
 		return c.StreamClient.Client
@@ -208,11 +212,11 @@ func (c *ADSConfig) GetStreamClient() ads.AggregatedDiscoveryService_StreamAggre
 	return streamClient
 }
 
-func (c *ADSConfig) GetADSRefreshDelay() *time.Duration {
+func (c *ADSConfig) getADSRefreshDelay() *time.Duration {
 	return c.RefreshDelay
 }
 
-func (c *ADSConfig) CloseADSStreamClient() {
+func (c *ADSConfig) closeADSStreamClient() {
 	if c.StreamClient == nil {
 		return
 	}
